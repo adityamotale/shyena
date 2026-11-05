@@ -4879,6 +4879,7 @@ dependencies = [
  "async-channel 2.5.0",
  "global-hotkey",
  "gpui",
+ "raw-window-handle",
 ]
 
 [[package]]
