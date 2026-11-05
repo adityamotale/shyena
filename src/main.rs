@@ -6,6 +6,53 @@ use global_hotkey::{
 };
 use gpui::*;
 
+// Catppuccin Latte palette helpers
+struct Latte;
+impl Latte {
+    // Acrylic translucent Base background
+    fn base_acrylic() -> Rgba {
+        rgba(0xeff1f5c8)
+    }
+    // Acrylic translucent Mantle for header
+    fn mantle_acrylic() -> Rgba {
+        rgba(0xe6e9efe0)
+    }
+    // Acrylic translucent Crust for footer
+    fn crust_acrylic() -> Rgba {
+        rgba(0xdce0e8d0)
+    }
+    // Surface layers for borders and active items
+    fn surface0() -> Rgba {
+        rgb(0xccd0da)
+    }
+    fn surface1() -> Rgba {
+        rgba(0xbcc0cce8)
+    }
+    // Typography
+    fn text() -> Rgba {
+        rgb(0x4c4f69)
+    }
+    fn subtext0() -> Rgba {
+        rgb(0x6c6f85)
+    }
+    fn subtext1() -> Rgba {
+        rgb(0x5c5f77)
+    }
+    fn overlay0() -> Rgba {
+        rgb(0x9ca0b0)
+    }
+    fn overlay2() -> Rgba {
+        rgb(0x7c7f93)
+    }
+    // Accent colors
+    fn blue() -> Rgba {
+        rgb(0x1e66f5)
+    }
+    fn base_solid() -> Rgba {
+        rgb(0xeff1f5)
+    }
+}
+
 #[derive(Clone)]
 struct SearchItem {
     title: String,
@@ -57,11 +104,11 @@ impl SearchBar {
         vec![
             SearchItem {
                 title: "System Settings".to_string(),
-                subtitle: "Preferences and configuration".to_string(),
+                subtitle: "Preferences and system configuration".to_string(),
             },
             SearchItem {
                 title: "Terminal".to_string(),
-                subtitle: "Open command prompt".to_string(),
+                subtitle: "Open command prompt or PowerShell".to_string(),
             },
             SearchItem {
                 title: "File Explorer".to_string(),
@@ -164,25 +211,24 @@ impl Render for SearchBar {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x181825))
-            .rounded(px(14.0))
+            .bg(Latte::base_acrylic())
             .border_1()
-            .border_color(rgb(0x313244))
-            .shadow_lg()
+            .border_color(Latte::surface0())
             .overflow_hidden()
-            // Header search input
+            // Header search input (sharp rectangular aesthetic)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .h(px(54.0))
+                    .h(px(56.0))
                     .px(px(18.0))
+                    .bg(Latte::mantle_acrylic())
                     .border_b_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(Latte::surface0())
                     .child(
                         div()
-                            .mr(px(12.0))
-                            .text_color(rgb(0x89b4fa))
+                            .mr(px(14.0))
+                            .text_color(Latte::blue())
                             .text_size(px(18.0))
                             .child("⌕"),
                     )
@@ -190,22 +236,30 @@ impl Render for SearchBar {
                         div()
                             .flex_1()
                             .text_size(px(16.0))
-                            .text_color(rgb(0xcdd6f4))
+                            .text_color(Latte::text())
                             .child(if self.query.is_empty() {
                                 div()
-                                    .text_color(rgb(0x6c7086))
+                                    .text_color(Latte::overlay0())
                                     .child("Search or type a command... (Esc to dismiss)")
                             } else {
-                                div().child(format!("{}|", self.query))
+                                div()
+                                    .flex()
+                                    .child(self.query.clone())
+                                    .child(
+                                        div()
+                                            .text_color(Latte::blue())
+                                            .child("|")
+                                    )
                             }),
                     )
                     .child(
                         div()
                             .px(px(8.0))
                             .py(px(2.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0x313244))
-                            .text_color(rgb(0xa6adc8))
+                            .bg(Latte::surface0())
+                            .border_1()
+                            .border_color(Latte::surface0())
+                            .text_color(Latte::subtext1())
                             .text_size(px(11.0))
                             .child("ESC"),
                     ),
@@ -216,8 +270,8 @@ impl Render for SearchBar {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .py(px(8.0))
-                    .px(px(8.0))
+                    .py(px(6.0))
+                    .px(px(6.0))
                     .children(results.into_iter().enumerate().map(|(idx, item)| {
                         let is_active = idx == selected;
                         div()
@@ -226,8 +280,17 @@ impl Render for SearchBar {
                             .justify_between()
                             .px(px(12.0))
                             .py(px(8.0))
-                            .rounded(px(8.0))
-                            .bg(if is_active { rgb(0x313244) } else { rgb(0x181825) })
+                            .bg(if is_active {
+                                Latte::surface1()
+                            } else {
+                                rgba(0x00000000)
+                            })
+                            .border_l_2()
+                            .border_color(if is_active {
+                                Latte::blue()
+                            } else {
+                                rgba(0x00000000)
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -236,32 +299,47 @@ impl Render for SearchBar {
                                         div()
                                             .text_size(px(14.0))
                                             .text_color(if is_active {
-                                                rgb(0x89b4fa)
+                                                Latte::blue()
                                             } else {
-                                                rgb(0xcdd6f4)
+                                                Latte::text()
                                             })
                                             .child(item.title),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(12.0))
-                                            .text_color(rgb(0x6c7086))
+                                            .text_color(Latte::subtext0())
                                             .child(item.subtitle),
                                     ),
                             )
                             .child(if is_active {
                                 div()
-                                    .px(px(6.0))
+                                    .px(px(7.0))
                                     .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(0x45475a))
-                                    .text_color(rgb(0xbac2de))
+                                    .bg(Latte::blue())
+                                    .text_color(Latte::base_solid())
                                     .text_size(px(10.0))
                                     .child("↵ Enter")
                             } else {
                                 div()
                             })
                     })),
+            )
+            // Status bar footer
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(28.0))
+                    .px(px(14.0))
+                    .bg(Latte::crust_acrylic())
+                    .border_t_1()
+                    .border_color(Latte::surface0())
+                    .text_size(px(11.0))
+                    .text_color(Latte::overlay2())
+                    .child("Catppuccin Latte Acrylic")
+                    .child("Navigate: ↑↓ • Open: ↵ • Close: ESC"),
             )
     }
 }
@@ -272,7 +350,7 @@ fn open_search_window(
 ) -> WindowHandle<SearchBar> {
     let display = cx.displays().into_iter().next();
     let win_width = px(620.0);
-    let win_height = px(300.0);
+    let win_height = px(320.0);
 
     let (display_id, bounds) = if let Some(disp) = display {
         let screen_bounds = disp.bounds();
@@ -295,7 +373,8 @@ fn open_search_window(
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id,
         titlebar: None,
-        window_background: WindowBackgroundAppearance::Transparent,
+        // Acrylic blur behind effect on Windows
+        window_background: WindowBackgroundAppearance::Blurred,
         focus: true,
         show: true,
         kind: WindowKind::PopUp,
