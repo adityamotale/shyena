@@ -72,7 +72,7 @@ mod platform {
 
         // Windows 11 Acrylic: DWMWA_SYSTEMBACKDROP_TYPE (0x26 / 38) = DWMSBT_TRANSIENTWINDOW (0x03)
         let backdrop_type = DWMSBT_TRANSIENTWINDOW;
-        let res = unsafe {
+        let _ = unsafe {
             DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_SYSTEMBACKDROP_TYPE,
@@ -81,11 +81,7 @@ mod platform {
             )
         };
 
-        if res.is_ok() {
-            return true;
-        }
-
-        // Fallback for Windows 10
+        // Always apply composition attribute acrylic blur (same method used by Windows Terminal)
         apply_win10_acrylic_fallback(hwnd)
     }
 
@@ -118,7 +114,7 @@ mod platform {
             let accent = AccentPolicy {
                 accent_state: 0x04,
                 accent_flags: 0x02,
-                gradient_color: 0x66f5f1ef,
+                gradient_color: 0x18f5f1ef,
                 animation_id: 0x00,
             };
             let mut data = WindowCompositionAttribData {
@@ -173,9 +169,9 @@ mod platform {
 struct Latte;
 #[allow(dead_code)]
 impl Latte {
-    // Acrylic translucent Base background (~55% alpha to let blur and grain show through)
+    // Acrylic translucent Base background (~10% alpha to let blur and grain dominate)
     fn base_acrylic() -> Rgba {
-        rgba(0xeff1f58c)
+        rgba(0xeff1f518)
     }
     // Acrylic translucent Mantle for header (~70% alpha)
     fn mantle_acrylic() -> Rgba {
@@ -602,8 +598,8 @@ fn open_search_window(
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id,
         titlebar: None,
-        // Transparent DX swapchain allows DWM acrylic composition to render through
-        window_background: WindowBackgroundAppearance::Transparent,
+        // Native acrylic blur backdrop via GPUI compositor
+        window_background: WindowBackgroundAppearance::Blurred,
         focus: true,
         show: true,
         kind: WindowKind::PopUp,
