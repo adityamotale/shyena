@@ -6,8 +6,8 @@ use global_hotkey::{
 };
 use gpui::*;
 
-const WIN_WIDTH: f32 = 620.0;
-const BAR_HEIGHT: f32 = 56.0;
+const WIN_WIDTH: f32 = 600.0;
+const BAR_HEIGHT: f32 = 52.0;
 const EXPANDED_HEIGHT: f32 = 320.0;
 
 #[cfg(target_os = "windows")]
@@ -17,7 +17,7 @@ mod platform {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
         DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
-        DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -58,6 +58,17 @@ mod platform {
             cyBottomHeight: -1,
         };
         let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+
+        // Windows 11 rounded window corners
+        let corner_pref = DWMWCP_ROUND;
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner_pref as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&corner_pref) as u32,
+            )
+        };
 
         // Windows 11 Acrylic: DWMWA_SYSTEMBACKDROP_TYPE (0x26 / 38) = DWMSBT_TRANSIENTWINDOW (0x03)
         let backdrop_type = DWMSBT_TRANSIENTWINDOW;
@@ -160,6 +171,7 @@ mod platform {
 
 // Catppuccin Latte palette helpers
 struct Latte;
+#[allow(dead_code)]
 impl Latte {
     // Acrylic translucent Base background (~55% alpha to let blur and grain show through)
     fn base_acrylic() -> Rgba {
@@ -176,6 +188,9 @@ impl Latte {
     // Surface layers for borders and active items
     fn surface0() -> Rgba {
         rgb(0xccd0da)
+    }
+    fn border_glass() -> Rgba {
+        rgba(0xccd0da80)
     }
     fn surface1() -> Rgba {
         rgba(0xbcc0ccd8)
@@ -408,17 +423,22 @@ impl Render for SearchBar {
             .flex()
             .flex_col()
             .bg(base_bg)
+            .rounded(px(12.0))
             .border_1()
-            .border_color(Latte::surface0())
+            .border_color(Latte::border_glass())
             .overflow_hidden()
-            // Header search input (sharp rectangular aesthetic with zero radius)
+            // Header search input (clean minimal acrylic bar)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .h(px(BAR_HEIGHT))
-                    .px(px(18.0))
-                    .bg(mantle_bg)
+                    .px(px(20.0))
+                    .bg(if is_empty {
+                        rgba(0x00000000)
+                    } else {
+                        mantle_bg
+                    })
                     .border_b_1()
                     .border_color(if is_empty {
                         rgba(0x00000000)
@@ -430,7 +450,7 @@ impl Render for SearchBar {
                             .mr(px(14.0))
                             .text_color(Latte::blue())
                             .text_size(px(18.0))
-                            .child("⌕"),
+                            .child("›"),
                     )
                     .child(
                         div()
@@ -440,28 +460,31 @@ impl Render for SearchBar {
                             .child(if self.query.is_empty() {
                                 div()
                                     .text_color(Latte::overlay0())
-                                    .child("Search or type a command... (Esc to dismiss)")
+                                    .child("Type a command or search...")
                             } else {
                                 div()
                                     .flex()
+                                    .items_center()
                                     .child(self.query.clone())
                                     .child(
                                         div()
-                                            .text_color(Latte::blue())
-                                            .child("|")
+                                            .ml(px(2.0))
+                                            .w(px(2.0))
+                                            .h(px(18.0))
+                                            .bg(Latte::blue()),
                                     )
                             }),
                     )
                     .child(
                         div()
-                            .px(px(8.0))
+                            .px(px(6.0))
                             .py(px(2.0))
-                            .bg(Latte::surface0())
+                            .rounded(px(4.0))
                             .border_1()
-                            .border_color(Latte::surface0())
-                            .text_color(Latte::subtext1())
+                            .border_color(rgba(0xccd0da66))
+                            .text_color(Latte::subtext0())
                             .text_size(px(11.0))
-                            .child("ESC"),
+                            .child("esc"),
                     ),
             );
 
@@ -561,7 +584,7 @@ fn open_search_window(
     let (display_id, bounds) = if let Some(disp) = display {
         let screen_bounds = disp.bounds();
         let x = screen_bounds.origin.x + (screen_bounds.size.width - win_width) / 2.0;
-        let y = screen_bounds.origin.y + (screen_bounds.size.height - win_height) / 2.0;
+        let y = screen_bounds.origin.y + (screen_bounds.size.height - win_height) * 0.22;
         let b = Bounds {
             origin: point(x, y),
             size: size(win_width, win_height),
