@@ -6,6 +6,9 @@ use global_hotkey::{
 };
 use gpui::*;
 
+mod theme;
+use theme::Latte;
+
 const WIN_WIDTH: f32 = 600.0;
 const BAR_HEIGHT: f32 = 52.0;
 const EXPANDED_HEIGHT: f32 = 320.0;
@@ -162,63 +165,6 @@ mod platform {
 
     pub fn make_always_on_top(_window: &Window) -> bool {
         false
-    }
-}
-
-// Catppuccin Latte palette helpers
-struct Latte;
-#[allow(dead_code)]
-impl Latte {
-    // Acrylic translucent Base background (~10% alpha to let blur and grain dominate)
-    fn base_acrylic() -> Rgba {
-        rgba(0xeff1f518)
-    }
-    // Acrylic translucent Mantle for header (~70% alpha)
-    fn mantle_acrylic() -> Rgba {
-        rgba(0xe6e9efb2)
-    }
-    // Acrylic translucent Crust for footer
-    fn crust_acrylic() -> Rgba {
-        rgba(0xdce0e8b2)
-    }
-    // Surface layers for borders and active items
-    fn surface0() -> Rgba {
-        rgb(0xccd0da)
-    }
-    fn border_glass() -> Rgba {
-        rgba(0xccd0da80)
-    }
-    fn surface1() -> Rgba {
-        rgba(0xbcc0ccd8)
-    }
-    // Typography
-    fn text() -> Rgba {
-        rgb(0x4c4f69)
-    }
-    fn subtext0() -> Rgba {
-        rgb(0x6c6f85)
-    }
-    fn subtext1() -> Rgba {
-        rgb(0x5c5f77)
-    }
-    fn overlay0() -> Rgba {
-        rgb(0x9ca0b0)
-    }
-    fn overlay2() -> Rgba {
-        rgb(0x7c7f93)
-    }
-    // Accent colors
-    fn blue() -> Rgba {
-        rgb(0x1e66f5)
-    }
-    fn base_solid() -> Rgba {
-        rgb(0xeff1f5)
-    }
-    fn mantle_solid() -> Rgba {
-        rgb(0xe6e9ef)
-    }
-    fn crust_solid() -> Rgba {
-        rgb(0xdce0e8)
     }
 }
 
@@ -429,7 +375,7 @@ impl Render for SearchBar {
                     .flex()
                     .items_center()
                     .h(px(BAR_HEIGHT))
-                    .px(px(20.0))
+                    .px(px(18.0))
                     .bg(if is_empty {
                         rgba(0x00000000)
                     } else {
@@ -439,11 +385,11 @@ impl Render for SearchBar {
                     .border_color(if is_empty {
                         rgba(0x00000000)
                     } else {
-                        Latte::surface0()
+                        Latte::border_subtle()
                     })
                     .child(
                         div()
-                            .mr(px(14.0))
+                            .mr(px(12.0))
                             .text_color(Latte::blue())
                             .text_size(px(18.0))
                             .child("›"),
@@ -451,11 +397,11 @@ impl Render for SearchBar {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(16.0))
+                            .text_size(px(15.0))
                             .text_color(Latte::text())
                             .child(if self.query.is_empty() {
                                 div()
-                                    .text_color(Latte::overlay0())
+                                    .text_color(Latte::subtext0())
                                     .child("Type a command or search...")
                             } else {
                                 div()
@@ -466,7 +412,7 @@ impl Render for SearchBar {
                                         div()
                                             .ml(px(2.0))
                                             .w(px(2.0))
-                                            .h(px(18.0))
+                                            .h(px(16.0))
                                             .bg(Latte::blue()),
                                     )
                             }),
@@ -476,11 +422,12 @@ impl Render for SearchBar {
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(4.0))
+                            .bg(Latte::keycap_bg())
                             .border_1()
-                            .border_color(rgba(0xccd0da66))
-                            .text_color(Latte::subtext0())
-                            .text_size(px(11.0))
-                            .child("esc"),
+                            .border_color(Latte::keycap_border())
+                            .text_color(Latte::subtext1())
+                            .text_size(px(10.0))
+                            .child("ESC"),
                     ),
             );
 
@@ -500,48 +447,59 @@ impl Render for SearchBar {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .px(px(12.0))
-                                .py(px(8.0))
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
                                 .bg(if is_active {
-                                    Latte::surface1()
-                                } else {
-                                    rgba(0x00000000)
-                                })
-                                .border_l_2()
-                                .border_color(if is_active {
-                                    Latte::blue()
+                                    Latte::item_active_bg()
                                 } else {
                                     rgba(0x00000000)
                                 })
                                 .child(
                                     div()
                                         .flex()
-                                        .flex_col()
+                                        .items_center()
                                         .child(
                                             div()
-                                                .text_size(px(14.0))
-                                                .text_color(if is_active {
+                                                .w(px(3.0))
+                                                .h(px(16.0))
+                                                .rounded(px(1.5))
+                                                .mr(px(8.0))
+                                                .bg(if is_active {
                                                     Latte::blue()
                                                 } else {
-                                                    Latte::text()
-                                                })
-                                                .child(item.title),
+                                                    rgba(0x00000000)
+                                                }),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(12.0))
-                                                .text_color(Latte::subtext0())
-                                                .child(item.subtitle),
+                                                .flex()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(13.5))
+                                                        .text_color(Latte::text())
+                                                        .child(item.title),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.5))
+                                                        .text_color(Latte::subtext0())
+                                                        .child(item.subtitle),
+                                                ),
                                         ),
                                 )
                                 .child(if is_active {
                                     div()
-                                        .px(px(7.0))
+                                        .px(px(6.0))
                                         .py(px(2.0))
-                                        .bg(Latte::blue())
-                                        .text_color(Latte::base_solid())
+                                        .rounded(px(4.0))
+                                        .bg(Latte::keycap_bg())
+                                        .border_1()
+                                        .border_color(Latte::keycap_border())
+                                        .text_color(Latte::subtext1())
                                         .text_size(px(10.0))
-                                        .child("↵ Enter")
+                                        .child("↵ Return")
                                 } else {
                                     div()
                                 })
@@ -556,11 +514,18 @@ impl Render for SearchBar {
                         .px(px(14.0))
                         .bg(crust_bg)
                         .border_t_1()
-                        .border_color(Latte::surface0())
-                        .text_size(px(11.0))
-                        .text_color(Latte::overlay2())
-                        .child("Catppuccin Latte Acrylic")
-                        .child("Navigate: ↑↓ • Open: ↵ • Close: ESC"),
+                        .border_color(Latte::border_subtle())
+                        .text_size(px(10.5))
+                        .child(
+                            div()
+                                .text_color(Latte::subtext0())
+                                .child("Catppuccin Latte"),
+                        )
+                        .child(
+                            div()
+                                .text_color(Latte::overlay1())
+                                .child("↑↓ navigate  •  ↵ open  •  esc close"),
+                        ),
                 );
         }
 
