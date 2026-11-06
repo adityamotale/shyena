@@ -8,3 +8,11 @@ gpui = "0.2.2"
 global-hotkey = "0.9.0"
 async-channel = "2.3"
 raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+] }

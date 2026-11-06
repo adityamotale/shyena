@@ -5,73 +5,80 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use gpui::*;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const WIN_WIDTH: f32 = 620.0;
 const BAR_HEIGHT: f32 = 56.0;
 const EXPANDED_HEIGHT: f32 = 320.0;
 
-// Win32 DWM & User32 composition definitions for Acrylic blur
-#[repr(C)]
-struct MARGINS {
-    cx_left_width: i32,
-    cx_right_width: i32,
-    cy_top_height: i32,
-    cy_bottom_height: i32,
-}
+#[cfg(target_os = "windows")]
+mod platform {
+    use gpui::Window;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
+        DWMWA_SYSTEMBACKDROP_TYPE,
+    };
+    use windows::Win32::UI::Controls::MARGINS;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
 
-#[repr(C)]
-struct AccentPolicy {
-    accent_state: u32,
-    accent_flags: u32,
-    gradient_color: u32,
-    animation_id: u32,
-}
-
-#[repr(C)]
-struct WindowCompositionAttribData {
-    attrib: u32,
-    pv_data: *mut std::ffi::c_void,
-    cb_data: usize,
-}
-
-unsafe fn apply_acrylic(hwnd: *mut std::ffi::c_void) {
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmExtendFrameIntoClientArea(
-            h_wnd: *mut std::ffi::c_void,
-            p_mar_inset: *const MARGINS,
-        ) -> i32;
-        fn DwmSetWindowAttribute(
-            h_wnd: *mut std::ffi::c_void,
-            dw_attribute: u32,
-            pv_attribute: *const std::ffi::c_void,
-            cb_attribute: u32,
-        ) -> i32;
+    #[repr(C)]
+    struct AccentPolicy {
+        accent_state: u32,
+        accent_flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
     }
 
-    // Extend DWM frame into client area so backdrop blur is visible across entire window
-    let margins = MARGINS {
-        cx_left_width: -1,
-        cx_right_width: -1,
-        cy_top_height: -1,
-        cy_bottom_height: -1,
-    };
-    let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+    #[repr(C)]
+    struct WindowCompositionAttribData {
+        attrib: u32,
+        pv_data: *mut std::ffi::c_void,
+        cb_data: usize,
+    }
 
-    // Windows 11 DWMWA_SYSTEMBACKDROP_TYPE = 38; DWMSBT_TRANSIENTWINDOW = 3 (Acrylic)
-    let backdrop_type: u32 = 3;
-    let hr = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            38,
-            &backdrop_type as *const _ as *const std::ffi::c_void,
-            std::mem::size_of::<u32>() as u32,
-        )
-    };
+    pub fn apply_acrylic(window: &Window) -> bool {
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
 
-    // Windows 10 Fallback: SetWindowCompositionAttribute with ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
-    if hr != 0 {
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return false;
+        };
+
+        let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
+
+        // Extend DWM frame into client area
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+
+        // Windows 11 Acrylic: DWMWA_SYSTEMBACKDROP_TYPE (0x26 / 38) = DWMSBT_TRANSIENTWINDOW (0x03)
+        let backdrop_type = DWMSBT_TRANSIENTWINDOW;
+        let res = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdrop_type as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&backdrop_type) as u32,
+            )
+        };
+
+        if res.is_ok() {
+            return true;
+        }
+
+        // Fallback for Windows 10
+        apply_win10_acrylic_fallback(hwnd)
+    }
+
+    fn apply_win10_acrylic_fallback(hwnd: HWND) -> bool {
         #[link(name = "user32")]
         unsafe extern "system" {
             fn GetModuleHandleA(lp_module_name: *const u8) -> *mut std::ffi::c_void;
@@ -80,31 +87,74 @@ unsafe fn apply_acrylic(hwnd: *mut std::ffi::c_void) {
                 lp_proc_name: *const u8,
             ) -> *mut std::ffi::c_void;
         }
-        let user32 = unsafe { GetModuleHandleA(b"user32.dll\0".as_ptr()) };
-        if !user32.is_null() {
-            let func = unsafe {
-                GetProcAddress(user32, b"SetWindowCompositionAttribute\0".as_ptr())
-            };
-            if !func.is_null() {
-                type SetAttrFn = unsafe extern "system" fn(
-                    *mut std::ffi::c_void,
-                    *mut WindowCompositionAttribData,
-                ) -> i32;
-                let set_attr: SetAttrFn = unsafe { std::mem::transmute(func) };
-                let accent = AccentPolicy {
-                    accent_state: 4,
-                    accent_flags: 2,
-                    gradient_color: 0x66f5f1ef,
-                    animation_id: 0,
-                };
-                let mut data = WindowCompositionAttribData {
-                    attrib: 0x13,
-                    pv_data: &accent as *const _ as *mut _,
-                    cb_data: std::mem::size_of::<AccentPolicy>(),
-                };
-                let _ = unsafe { set_attr(hwnd, &mut data) };
+
+        unsafe {
+            let user32 = GetModuleHandleA(b"user32.dll\0".as_ptr());
+            if user32.is_null() {
+                return false;
             }
+
+            let func = GetProcAddress(user32, b"SetWindowCompositionAttribute\0".as_ptr());
+            if func.is_null() {
+                return false;
+            }
+
+            type SetAttrFn = unsafe extern "system" fn(
+                HWND,
+                *mut WindowCompositionAttribData,
+            ) -> i32;
+            let set_attr: SetAttrFn = std::mem::transmute(func);
+            let accent = AccentPolicy {
+                accent_state: 0x04,
+                accent_flags: 0x02,
+                gradient_color: 0x66f5f1ef,
+                animation_id: 0x00,
+            };
+            let mut data = WindowCompositionAttribData {
+                attrib: 0x13,
+                pv_data: &accent as *const _ as *mut _,
+                cb_data: std::mem::size_of::<AccentPolicy>(),
+            };
+            set_attr(hwnd, &mut data) != 0
         }
+    }
+
+    pub fn make_always_on_top(window: &Window) -> bool {
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return false;
+        };
+
+        let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
+        unsafe {
+            let res = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+            let _ = SetForegroundWindow(hwnd);
+            res.is_ok()
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod platform {
+    use gpui::Window;
+
+    pub fn apply_acrylic(_window: &Window) -> bool {
+        false
+    }
+
+    pub fn make_always_on_top(_window: &Window) -> bool {
+        false
     }
 }
 
@@ -153,6 +203,12 @@ impl Latte {
     fn base_solid() -> Rgba {
         rgb(0xeff1f5)
     }
+    fn mantle_solid() -> Rgba {
+        rgb(0xe6e9ef)
+    }
+    fn crust_solid() -> Rgba {
+        rgb(0xdce0e8)
+    }
 }
 
 #[derive(Clone)]
@@ -167,6 +223,7 @@ struct SearchBar {
     selected_index: usize,
     items: Vec<SearchItem>,
     was_active: bool,
+    acrylic_applied: bool,
     _subscription: Subscription,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
 }
@@ -180,13 +237,8 @@ impl SearchBar {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
 
-        // Apply true Win32 Acrylic blur behind the client area
-        if let Ok(handle) = HasWindowHandle::window_handle(window) {
-            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
-                unsafe { apply_acrylic(hwnd) };
-            }
-        }
+        let acrylic_applied = platform::apply_acrylic(window);
+        let _ = platform::make_always_on_top(window);
 
         let subscription = cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
@@ -205,6 +257,7 @@ impl SearchBar {
             selected_index: 0,
             items: Self::default_items(),
             was_active: false,
+            acrylic_applied,
             _subscription: subscription,
             active_window,
         }
@@ -272,6 +325,22 @@ impl Render for SearchBar {
         let is_empty = self.query.trim().is_empty();
         let selected = self.selected_index.min(results.len().saturating_sub(1));
 
+        let base_bg = if self.acrylic_applied {
+            Latte::base_acrylic()
+        } else {
+            Latte::base_solid()
+        };
+        let mantle_bg = if self.acrylic_applied {
+            Latte::mantle_acrylic()
+        } else {
+            Latte::mantle_solid()
+        };
+        let crust_bg = if self.acrylic_applied {
+            Latte::crust_acrylic()
+        } else {
+            Latte::crust_solid()
+        };
+
         let mut root = div()
             .track_focus(&self.focus_handle)
             .key_context("search_bar")
@@ -338,7 +407,7 @@ impl Render for SearchBar {
             .size_full()
             .flex()
             .flex_col()
-            .bg(Latte::base_acrylic())
+            .bg(base_bg)
             .border_1()
             .border_color(Latte::surface0())
             .overflow_hidden()
@@ -349,7 +418,7 @@ impl Render for SearchBar {
                     .items_center()
                     .h(px(BAR_HEIGHT))
                     .px(px(18.0))
-                    .bg(Latte::mantle_acrylic())
+                    .bg(mantle_bg)
                     .border_b_1()
                     .border_color(if is_empty {
                         rgba(0x00000000)
@@ -466,7 +535,7 @@ impl Render for SearchBar {
                         .justify_between()
                         .h(px(28.0))
                         .px(px(14.0))
-                        .bg(Latte::crust_acrylic())
+                        .bg(crust_bg)
                         .border_t_1()
                         .border_color(Latte::surface0())
                         .text_size(px(11.0))
@@ -553,10 +622,10 @@ fn toggle_search_window(
 
 fn setup_global_hotkey(tx: Sender<()>) -> GlobalHotKeyManager {
     let manager = GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
-    // Register Alt + Space
-    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
+    // Register Alt + Backquote (tilde key)
+    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Backquote);
     let hotkey_id = hotkey.id();
-    manager.register(hotkey).expect("Failed to register Alt+Space global hotkey");
+    manager.register(hotkey).expect("Failed to register Alt+Backquote global hotkey");
 
     let event_receiver = GlobalHotKeyEvent::receiver().clone();
     thread::spawn(move || {
