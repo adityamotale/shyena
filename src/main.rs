@@ -186,6 +186,7 @@ impl Render for SearchBar {
             .size_full()
             .flex()
             .flex_col()
+            .font_family("GeistMono Nerd Font Mono")
             .bg(Theme::terminal_bg())
             .rounded(px(0.0))
             .border_1()
@@ -406,6 +407,17 @@ fn main() {
     let app = Application::new();
 
     app.run(|cx: &mut App| {
+        cx.text_system()
+            .add_fonts(vec![
+                std::borrow::Cow::Borrowed(include_bytes!(
+                    "../assets/fonts/GeistMonoNerdFontMono-Regular.otf"
+                )),
+                std::borrow::Cow::Borrowed(include_bytes!(
+                    "../assets/fonts/GeistMonoNerdFontMono-Italic.otf"
+                )),
+            ])
+            .expect("Failed to register GeistMono Nerd Font");
+
         let (tx, rx): (Sender<()>, Receiver<()>) = async_channel::unbounded();
 
         // Hotkey manager must stay alive for the lifetime of the application
