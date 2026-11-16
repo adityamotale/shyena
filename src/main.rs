@@ -7,11 +7,10 @@ use global_hotkey::{
 use gpui::*;
 
 mod theme;
-use theme::Latte;
+use theme::Mocha as Theme;
 
-const WIN_WIDTH: f32 = 600.0;
-const BAR_HEIGHT: f32 = 52.0;
-const EXPANDED_HEIGHT: f32 = 320.0;
+const WIN_WIDTH: f32 = 660.0;
+const BAR_HEIGHT: f32 = 62.0;
 
 #[cfg(target_os = "windows")]
 mod platform {
@@ -19,51 +18,36 @@ mod platform {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
-        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_DONOTROUND,
     };
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::WindowsAndMessaging::{
         SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     };
 
-    #[repr(C)]
-    struct AccentPolicy {
-        accent_state: u32,
-        accent_flags: u32,
-        gradient_color: u32,
-        animation_id: u32,
-    }
-
-    #[repr(C)]
-    struct WindowCompositionAttribData {
-        attrib: u32,
-        pv_data: *mut std::ffi::c_void,
-        cb_data: usize,
-    }
-
-    pub fn apply_acrylic(window: &Window) -> bool {
+    pub fn setup_window(window: &Window) {
         let Ok(handle) = HasWindowHandle::window_handle(window) else {
-            return false;
+            return;
         };
 
         let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-            return false;
+            return;
         };
 
         let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
 
-        // Extend DWM frame into client area
+        // Extend 1px frame into client area to activate Windows DWM hardware drop shadow
         let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
+            cxLeftWidth: 1,
+            cxRightWidth: 1,
+            cyTopHeight: 1,
+            cyBottomHeight: 1,
         };
         let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
 
-        // Windows 11 rounded window corners
-        let corner_pref = DWMWCP_ROUND;
+        // Authentic sharp TUI window geometry (0px corner radius)
+        let corner_pref = DWMWCP_DONOTROUND;
         let _ = unsafe {
             DwmSetWindowAttribute(
                 hwnd,
@@ -72,61 +56,6 @@ mod platform {
                 std::mem::size_of_val(&corner_pref) as u32,
             )
         };
-
-        // Windows 11 Acrylic: DWMWA_SYSTEMBACKDROP_TYPE (0x26 / 38) = DWMSBT_TRANSIENTWINDOW (0x03)
-        let backdrop_type = DWMSBT_TRANSIENTWINDOW;
-        let _ = unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                &backdrop_type as *const _ as *const std::ffi::c_void,
-                std::mem::size_of_val(&backdrop_type) as u32,
-            )
-        };
-
-        // Always apply composition attribute acrylic blur (same method used by Windows Terminal)
-        apply_win10_acrylic_fallback(hwnd)
-    }
-
-    fn apply_win10_acrylic_fallback(hwnd: HWND) -> bool {
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn GetModuleHandleA(lp_module_name: *const u8) -> *mut std::ffi::c_void;
-            fn GetProcAddress(
-                h_module: *mut std::ffi::c_void,
-                lp_proc_name: *const u8,
-            ) -> *mut std::ffi::c_void;
-        }
-
-        unsafe {
-            let user32 = GetModuleHandleA(b"user32.dll\0".as_ptr());
-            if user32.is_null() {
-                return false;
-            }
-
-            let func = GetProcAddress(user32, b"SetWindowCompositionAttribute\0".as_ptr());
-            if func.is_null() {
-                return false;
-            }
-
-            type SetAttrFn = unsafe extern "system" fn(
-                HWND,
-                *mut WindowCompositionAttribData,
-            ) -> i32;
-            let set_attr: SetAttrFn = std::mem::transmute(func);
-            let accent = AccentPolicy {
-                accent_state: 0x04,
-                accent_flags: 0x02,
-                gradient_color: 0x18f5f1ef,
-                animation_id: 0x00,
-            };
-            let mut data = WindowCompositionAttribData {
-                attrib: 0x13,
-                pv_data: &accent as *const _ as *mut _,
-                cb_data: std::mem::size_of::<AccentPolicy>(),
-            };
-            set_attr(hwnd, &mut data) != 0
-        }
     }
 
     pub fn make_always_on_top(window: &Window) -> bool {
@@ -159,28 +88,17 @@ mod platform {
 mod platform {
     use gpui::Window;
 
-    pub fn apply_acrylic(_window: &Window) -> bool {
-        false
-    }
+    pub fn setup_window(_window: &Window) {}
 
     pub fn make_always_on_top(_window: &Window) -> bool {
         false
     }
 }
 
-#[derive(Clone)]
-struct SearchItem {
-    title: String,
-    subtitle: String,
-}
-
 struct SearchBar {
     focus_handle: FocusHandle,
     query: String,
-    selected_index: usize,
-    items: Vec<SearchItem>,
     was_active: bool,
-    acrylic_applied: bool,
     _subscription: Subscription,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
 }
@@ -194,7 +112,7 @@ impl SearchBar {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
 
-        let acrylic_applied = platform::apply_acrylic(window);
+        platform::setup_window(window);
         let _ = platform::make_always_on_top(window);
 
         let subscription = cx.observe_window_activation(window, |this, window, cx| {
@@ -211,66 +129,14 @@ impl SearchBar {
         Self {
             focus_handle,
             query: String::new(),
-            selected_index: 0,
-            items: Self::default_items(),
             was_active: false,
-            acrylic_applied,
             _subscription: subscription,
             active_window,
         }
     }
 
-    fn default_items() -> Vec<SearchItem> {
-        vec![
-            SearchItem {
-                title: "System Settings".to_string(),
-                subtitle: "Preferences and system configuration".to_string(),
-            },
-            SearchItem {
-                title: "Terminal".to_string(),
-                subtitle: "Open command prompt or PowerShell".to_string(),
-            },
-            SearchItem {
-                title: "File Explorer".to_string(),
-                subtitle: "Browse files and directories".to_string(),
-            },
-            SearchItem {
-                title: "Web Browser".to_string(),
-                subtitle: "Launch default internet browser".to_string(),
-            },
-        ]
-    }
-
-    // When query is empty, return no items so initial search bar is completely empty
-    fn filtered_items(&self) -> Vec<SearchItem> {
-        if self.query.trim().is_empty() {
-            return Vec::new();
-        }
-        let q = self.query.to_lowercase();
-        let mut matches: Vec<SearchItem> = self
-            .items
-            .iter()
-            .filter(|it| {
-                it.title.to_lowercase().contains(&q)
-                    || it.subtitle.to_lowercase().contains(&q)
-            })
-            .cloned()
-            .collect();
-
-        if matches.is_empty() {
-            matches.push(SearchItem {
-                title: format!("Run: \"{}\"", self.query),
-                subtitle: "Execute custom command or search".to_string(),
-            });
-        }
-        matches
-    }
-
     fn execute(&self, window: &mut Window) {
-        let results = self.filtered_items();
-        if let Some(item) = results.get(self.selected_index) {
-            println!("Selected: {} ({})", item.title, item.subtitle);
-        }
+        println!("Terminal command executed: {}", self.query.trim());
         *self.active_window.borrow_mut() = None;
         window.remove_window();
     }
@@ -278,29 +144,21 @@ impl SearchBar {
 
 impl Render for SearchBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = self.filtered_items();
-        let is_empty = self.query.trim().is_empty();
-        let selected = self.selected_index.min(results.len().saturating_sub(1));
-
-        let base_bg = if self.acrylic_applied {
-            Latte::base_acrylic()
+        let (mode_label, mode_color) = if self.query.is_empty() {
+            ("READY", Theme::subtext0())
+        } else if self.query.starts_with('>') || self.query.starts_with('$') {
+            ("↵ RUN", Theme::yellow())
+        } else if self.query.starts_with('@') {
+            ("↵ FILE", Theme::blue())
+        } else if self.query.starts_with('?') {
+            ("↵ WEB", Theme::sky())
         } else {
-            Latte::base_solid()
-        };
-        let mantle_bg = if self.acrylic_applied {
-            Latte::mantle_acrylic()
-        } else {
-            Latte::mantle_solid()
-        };
-        let crust_bg = if self.acrylic_applied {
-            Latte::crust_acrylic()
-        } else {
-            Latte::crust_solid()
+            ("↵ EXEC", Theme::green())
         };
 
-        let mut root = div()
+        div()
             .track_focus(&self.focus_handle)
-            .key_context("search_bar")
+            .key_context("terminal_bar")
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "escape" => {
@@ -310,52 +168,16 @@ impl Render for SearchBar {
                     "enter" => {
                         this.execute(window);
                     }
-                    "up" => {
-                        let total = this.filtered_items().len();
-                        if total > 0 {
-                            this.selected_index = if this.selected_index == 0 {
-                                total - 1
-                            } else {
-                                this.selected_index - 1
-                            };
-                            cx.notify();
-                        }
-                    }
-                    "down" => {
-                        let total = this.filtered_items().len();
-                        if total > 0 {
-                            this.selected_index = (this.selected_index + 1) % total;
-                            cx.notify();
-                        }
-                    }
                     "backspace" => {
                         this.query.pop();
-                        this.selected_index = 0;
-                        let target_height = if this.query.trim().is_empty() {
-                            BAR_HEIGHT
-                        } else {
-                            EXPANDED_HEIGHT
-                        };
-                        window.resize(size(px(WIN_WIDTH), px(target_height)));
                         cx.notify();
                     }
                     _ => {
-                        let mut changed = false;
                         if let Some(ch) = &event.keystroke.key_char {
                             this.query.push_str(ch);
-                            changed = true;
+                            cx.notify();
                         } else if event.keystroke.key.chars().count() == 1 {
                             this.query.push_str(&event.keystroke.key);
-                            changed = true;
-                        }
-                        if changed {
-                            this.selected_index = 0;
-                            let target_height = if this.query.trim().is_empty() {
-                                BAR_HEIGHT
-                            } else {
-                                EXPANDED_HEIGHT
-                            };
-                            window.resize(size(px(WIN_WIDTH), px(target_height)));
                             cx.notify();
                         }
                     }
@@ -364,181 +186,139 @@ impl Render for SearchBar {
             .size_full()
             .flex()
             .flex_col()
-            .bg(base_bg)
-            .rounded(px(12.0))
+            .bg(Theme::terminal_bg())
+            .rounded(px(0.0))
             .border_1()
-            .border_color(Latte::border_glass())
+            .border_color(Theme::terminal_frame())
             .overflow_hidden()
-            // Header search input (clean minimal acrylic bar)
+            // Top ASCII TUI header bracket
             .child(
                 div()
+                    .h(px(20.0))
+                    .px(px(10.0))
+                    .bg(Theme::terminal_header())
+                    .border_b_1()
+                    .border_color(Theme::border_subtle())
                     .flex()
                     .items_center()
-                    .h(px(BAR_HEIGHT))
-                    .px(px(18.0))
-                    .bg(if is_empty {
-                        rgba(0x00000000)
-                    } else {
-                        mantle_bg
-                    })
-                    .border_b_1()
-                    .border_color(if is_empty {
-                        rgba(0x00000000)
-                    } else {
-                        Latte::border_subtle()
-                    })
+                    .justify_between()
+                    .text_size(px(10.5))
                     .child(
                         div()
-                            .mr(px(12.0))
-                            .text_color(Latte::blue())
-                            .text_size(px(18.0))
-                            .child("›"),
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_color(Theme::terminal_bracket())
+                                    .child("┌─["),
+                            )
+                            .child(
+                                div()
+                                    .text_color(Theme::green())
+                                    .child("shyena::cli"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(Theme::terminal_bracket())
+                                    .child("]"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_color(Theme::subtext0())
+                                    .child("[ ESC: exit ]"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(Theme::terminal_bracket())
+                                    .child("─┐"),
+                            ),
+                    ),
+            )
+            // Input stream with leading prompt and solid terminal block cursor
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .px(px(12.0))
+                    .child(
+                        div()
+                            .mr(px(10.0))
+                            .flex()
+                            .items_center()
+                            .text_color(Theme::green())
+                            .text_size(px(14.0))
+                            .child("❯"),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(15.0))
-                            .text_color(Latte::text())
+                            .flex()
+                            .items_center()
+                            .text_size(px(13.5))
                             .child(if self.query.is_empty() {
                                 div()
-                                    .text_color(Latte::subtext0())
-                                    .child("Type a command or search...")
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_color(Theme::overlay0())
+                                            .child("type command, @file, or ?search..."),
+                                    )
+                                    .child(
+                                        div()
+                                            .ml(px(2.0))
+                                            .text_color(Theme::green())
+                                            .child("█"),
+                                    )
                             } else {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .child(self.query.clone())
+                                    .child(
+                                        div()
+                                            .text_color(Theme::text())
+                                            .child(self.query.clone()),
+                                    )
                                     .child(
                                         div()
                                             .ml(px(2.0))
-                                            .w(px(2.0))
-                                            .h(px(16.0))
-                                            .bg(Latte::blue()),
+                                            .text_color(Theme::green())
+                                            .child("█"),
                                     )
                             }),
                     )
+                    // Sharp bracketed action tag
                     .child(
                         div()
                             .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .bg(Latte::keycap_bg())
+                            .py(px(1.5))
+                            .rounded(px(0.0))
+                            .bg(Theme::surface0())
                             .border_1()
-                            .border_color(Latte::keycap_border())
-                            .text_color(Latte::subtext1())
-                            .text_size(px(10.0))
-                            .child("ESC"),
+                            .border_color(Theme::surface1())
+                            .text_color(mode_color)
+                            .text_size(px(10.5))
+                            .child(format!("[ {} ]", mode_label)),
                     ),
-            );
-
-        // Only render results list and status footer if query is not empty
-        if !is_empty {
-            root = root
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .py(px(6.0))
-                        .px(px(6.0))
-                        .children(results.into_iter().enumerate().map(|(idx, item)| {
-                            let is_active = idx == selected;
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded(px(6.0))
-                                .bg(if is_active {
-                                    Latte::item_active_bg()
-                                } else {
-                                    rgba(0x00000000)
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .w(px(3.0))
-                                                .h(px(16.0))
-                                                .rounded(px(1.5))
-                                                .mr(px(8.0))
-                                                .bg(if is_active {
-                                                    Latte::blue()
-                                                } else {
-                                                    rgba(0x00000000)
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(13.5))
-                                                        .text_color(Latte::text())
-                                                        .child(item.title),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(11.5))
-                                                        .text_color(Latte::subtext0())
-                                                        .child(item.subtitle),
-                                                ),
-                                        ),
-                                )
-                                .child(if is_active {
-                                    div()
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(4.0))
-                                        .bg(Latte::keycap_bg())
-                                        .border_1()
-                                        .border_color(Latte::keycap_border())
-                                        .text_color(Latte::subtext1())
-                                        .text_size(px(10.0))
-                                        .child("↵ Return")
-                                } else {
-                                    div()
-                                })
-                        })),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .h(px(28.0))
-                        .px(px(14.0))
-                        .bg(crust_bg)
-                        .border_t_1()
-                        .border_color(Latte::border_subtle())
-                        .text_size(px(10.5))
-                        .child(
-                            div()
-                                .text_color(Latte::subtext0())
-                                .child("Catppuccin Latte"),
-                        )
-                        .child(
-                            div()
-                                .text_color(Latte::overlay1())
-                                .child("↑↓ navigate  •  ↵ open  •  esc close"),
-                        ),
-                );
-        }
-
-        root
+            )
     }
 }
+
+
 
 fn open_search_window(
     cx: &mut App,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
 ) -> WindowHandle<SearchBar> {
     let display = cx.displays().into_iter().next();
-    // Opens initially as just the search bar
     let win_height = px(BAR_HEIGHT);
     let win_width = px(WIN_WIDTH);
 
@@ -563,8 +343,7 @@ fn open_search_window(
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id,
         titlebar: None,
-        // Native acrylic blur backdrop via GPUI compositor
-        window_background: WindowBackgroundAppearance::Blurred,
+        window_background: WindowBackgroundAppearance::Transparent,
         focus: true,
         show: true,
         kind: WindowKind::PopUp,
