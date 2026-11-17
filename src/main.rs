@@ -209,32 +209,48 @@ impl SearchBar {
 
     fn update_filtered_actions(&mut self, window: &mut Window) {
         let trimmed = self.query.trim();
-        let target_token = trimmed.split_whitespace().next().unwrap_or("");
+        let raw_token = trimmed.split_whitespace().next().unwrap_or("");
+
+        let (filter_scope, target_token) = if let Some(stripped) = raw_token.strip_prefix('@') {
+            (Some(ActionKind::App), stripped)
+        } else if let Some(stripped) = raw_token.strip_prefix('#') {
+            (Some(ActionKind::Ps), stripped)
+        } else {
+            (None, raw_token)
+        };
 
         let mut candidates = Vec::new();
-        for (key, app) in &self.config.apps {
-            if target_token.is_empty() || key.to_lowercase().contains(&target_token.to_lowercase()) {
-                candidates.push(CandidateAction {
-                    key: key.clone(),
-                    kind: ActionKind::App,
-                    detail: app.path.display().to_string(),
-                });
+        if filter_scope.is_none() || filter_scope == Some(ActionKind::App) {
+            for (key, app) in &self.config.apps {
+                if target_token.is_empty()
+                    || key.to_lowercase().contains(&target_token.to_lowercase())
+                {
+                    candidates.push(CandidateAction {
+                        key: key.clone(),
+                        kind: ActionKind::App,
+                        detail: app.path.display().to_string(),
+                    });
+                }
             }
         }
 
-        for (key, ps) in &self.config.ps {
-            if target_token.is_empty() || key.to_lowercase().contains(&target_token.to_lowercase()) {
-                let clean_script = ps.script.trim().replace('\n', " ");
-                let detail = if clean_script.len() > 60 {
-                    format!("{}...", &clean_script[..57])
-                } else {
-                    clean_script
-                };
-                candidates.push(CandidateAction {
-                    key: key.clone(),
-                    kind: ActionKind::Ps,
-                    detail,
-                });
+        if filter_scope.is_none() || filter_scope == Some(ActionKind::Ps) {
+            for (key, ps) in &self.config.ps {
+                if target_token.is_empty()
+                    || key.to_lowercase().contains(&target_token.to_lowercase())
+                {
+                    let clean_script = ps.script.trim().replace('\n', " ");
+                    let detail = if clean_script.len() > 60 {
+                        format!("{}...", &clean_script[..57])
+                    } else {
+                        clean_script
+                    };
+                    candidates.push(CandidateAction {
+                        key: key.clone(),
+                        kind: ActionKind::Ps,
+                        detail,
+                    });
+                }
             }
         }
 
@@ -299,23 +315,28 @@ impl SearchBar {
         let trimmed = self.query.trim();
         if !trimmed.is_empty() {
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            let action_key = tokens[0x00];
+            let raw_key = tokens[0x00];
+            let clean_key = raw_key
+                .strip_prefix('@')
+                .or_else(|| raw_key.strip_prefix('#'))
+                .unwrap_or(raw_key);
+
             let dynamic_args: Vec<String> = tokens[0x01..]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
 
-            if let Some(app) = self.config.apps.get(action_key) {
+            if let Some(app) = self.config.apps.get(clean_key) {
                 let candidate = CandidateAction {
-                    key: action_key.to_string(),
+                    key: clean_key.to_string(),
                     kind: ActionKind::App,
                     detail: app.path.display().to_string(),
                 };
                 self.execute_action(&candidate, &dynamic_args, window);
                 return;
-            } else if let Some(ps) = self.config.ps.get(action_key) {
+            } else if let Some(ps) = self.config.ps.get(clean_key) {
                 let candidate = CandidateAction {
-                    key: action_key.to_string(),
+                    key: clean_key.to_string(),
                     kind: ActionKind::Ps,
                     detail: ps.script.clone(),
                 };
@@ -344,16 +365,14 @@ impl Render for SearchBar {
 
         let (mode_label, mode_color) = if self.query.is_empty() {
             ("READY", Theme::subtext0())
+        } else if self.query.starts_with('@') {
+            ("@ APPS", Theme::green())
+        } else if self.query.starts_with('#') {
+            ("# PS", Theme::peach())
         } else if self.config.apps.contains_key(first_token) {
             ("↵ APP", Theme::green())
         } else if self.config.ps.contains_key(first_token) {
             ("↵ PS", Theme::peach())
-        } else if self.query.starts_with('>') || self.query.starts_with('$') {
-            ("↵ RUN", Theme::yellow())
-        } else if self.query.starts_with('@') {
-            ("↵ FILE", Theme::blue())
-        } else if self.query.starts_with('?') {
-            ("↵ WEB", Theme::sky())
         } else {
             ("↵ EXEC", Theme::green())
         };
@@ -499,7 +518,7 @@ impl Render for SearchBar {
                                     .child(
                                         div()
                                             .text_color(Theme::overlay0())
-                                            .child("type command, @file, or ?search..."),
+                                            .child("type command, @apps, or #ps..."),
                                     )
                                     .child(
                                         div()
