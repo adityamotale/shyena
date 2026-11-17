@@ -102,6 +102,12 @@ Register-App 'code' @{
 function echo {
     Write-Output $args
 }
+
+function brightness {
+    $target = [int]$args[0]
+    $wmi = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods
+    $wmi.WmiSetBrightness(1, $target)
+}
 "#;
         let _ = std::fs::write(path, DEFAULT_SHYENA);
         let ast = parser::Scanner::new(DEFAULT_SHYENA).parse();
