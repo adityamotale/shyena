@@ -11,14 +11,9 @@ sub-millisecond launcher;
 
 ### 1. Configuration Specification (`~/.config/shyena.toml`)
 * Stored at `~/.config/shyena.toml`
-* Validated via JSON Schema modeline hosted on GitHub raw content
-* Schema URL pinned to release tags (e.g. `v0.1.0`) to avoid breaking older clients
-* Schema generated at build time via `schemars` from Rust configuration structs
 * Two core action categories: `[apps]` and `[ps]`
 
 ```toml
-#:schema https://raw.githubusercontent.com/adityamotale/shyena/v0.1.0/schema.json
-
 [apps.br]
 path = "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe"
 args = ["--profile-directory=Profile 2"]
