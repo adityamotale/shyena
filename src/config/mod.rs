@@ -3,6 +3,11 @@ pub mod io;
 #[allow(unused_imports, dead_code)]
 pub use io::{resolve_config_path, ConfigReader};
 
+#[allow(unused_imports, dead_code)]
+pub mod parser;
+#[allow(unused_imports, dead_code)]
+pub use parser::{AppDef, ConfigAst, FunctionDef, ParseError, Scanner};
+
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
