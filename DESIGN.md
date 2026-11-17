@@ -1,0 +1,204 @@
+# Shyena System Design Specification
+
+---
+
+## 1. Executive Summary
+
+Shyena is a minimal, hardware-accelerated spotlight launcher and automation runner for Windows, built with GPUI.
+It replaces shell alias scripts, hotkey daemons, and traditional Windows search with a sub-millisecond, keyboard-driven interface.
+
+### Core Architecture Pillars
+- **Zero-Latency Fast Path**: Native application execution bypasses intermediate shells entirely;
+- **Async Automation Pipeline**: Long-running PowerShell automation executes off-thread without degrading frame presentation;
+- **Native Script Configuration**: Replaces static configuration serialization formats with native script-first declarations (`.shyena`);
+- **Keyboard-Centric Interaction**: Predictable prefix scoping, single-keystroke selection, and deterministic ranking;
+
+---
+
+## 2. Design System & Visual Presentation
+
+### Typography Pipeline & Embedded Assets
+- Monospace font family: **GeistMono Nerd Font Mono** (400 weight only)
+- Asset layout under `assets/fonts/`:
+  - `GeistMonoNerdFontMono-Regular.otf` — Regular base weight (400)
+  - `GeistMonoNerdFontMono-Italic.otf` — Italic base weight (400)
+  - `LICENSE-GeistMono.txt` — SIL Open Font License 1.1 (OFL)
+
+### In-Memory Font Loading
+- Embedded into the binary via `include_bytes!` to eliminate system font installation requirements;
+- Loaded at GPUI startup using `cx.text_system().add_fonts(...)`;
+- Cascades from root container via `.font_family("GeistMono Nerd Font Mono")`;
+- Strict 1-cell monospace icon width guarantees alignment across ASCII/TUI framing (`┌─[`, `─┐`), prompts (`❯`), and custom cursor blocks (`█`);
+
+### OFL 1.1 Compliance & Distribution
+- SIL Open Font License requires preserving copyright and license notices upon redistribution;
+- Source tree retains `assets/fonts/LICENSE-GeistMono.txt`;
+- Binary distributions must bundle license text within the distribution archive;
+
+### Layout Geometry & Aesthetics
+- **Width**: `620.0 px` fixed width, centered horizontally;
+- **Base Height**: `54.0 px` bar height (header pill + input line);
+- **Candidate Row Height**: `32.0 px` per matched candidate item;
+- **Candidate Ceiling**: `MAX_VISIBLE_ITEMS: 0x05`; window dynamically resizes up to `215.0 px`;
+- **Border Radius**: `0.0 px` sharp corners throughout container and list items;
+- **Color Palette**: High-contrast monochrome / slate aesthetic with distinct accents for `@app` and `#ps` scopes;
+
+---
+
+## 3. Search Bar Interface & State Machine
+
+### Dual-Token Syntax Contract
+Queries follow a clean tokenizer contract:
+- **First Token (`tokens[0]`)**: Resolves the action key;
+- **Subsequent Tokens (`tokens[1..]`)**: Forwarded dynamically to the target command or script;
+
+### Prefix Routing & Scoping
+- `@<query>`: Scopes search candidates exclusively to registered applications;
+- `#<query>`: Scopes search candidates exclusively to PowerShell automation functions;
+- Plain input evaluates across both domains simultaneously;
+
+### Candidate Ranking Precedence
+1. Exact match on target key (case-insensitive);
+2. Prefix match on target key (case-insensitive);
+3. Lexicographical ascending order;
+
+### Dual-Engine Execution Pipeline
+- **Native Binary Fast-Path (`@app`)**:
+  - Spawned directly via `std::process::Command` / Win32 `CreateProcessW`;
+  - Sub-5ms invocation latency; static flags applied without dynamic token expansion;
+- **PowerShell Async Pipeline (`#ps`)**:
+  - Dispatched to worker threads via an `async-channel` queue;
+  - Non-blocking execution preserves 60+ FPS UI interaction;
+  - Forwards CLI parameters directly to script functions;
+
+---
+
+## 4. Configuration Language Specification (`.shyena`)
+
+Shyena uses a dedicated configuration file format based on valid PowerShell syntax, removing TOML multi-line escaping overhead.
+
+### Target Path
+- Primary path: `~/.config/.shyena` (or `~/.config/.shyena.ps1`);
+
+### Language Construct Rules
+1. **Application Registration (`Register-App`)**:
+   Static definitions for binaries and fixed arguments with zero dynamic parameter logic:
+   ```powershell
+   Register-App 'code' @{
+       Path = 'C:/Users/froze/AppData/Local/Programs/Microsoft VS Code/Code.exe'
+       Args = @('--reuse-window')
+   }
+   ```
+2. **PowerShell Automation Functions (`function <name>`)**:
+   Commands requiring dynamic parameters, system control, or multi-step logic are written as standard PowerShell functions:
+   ```powershell
+   function brightness {
+       param(
+           [Parameter(Mandatory = $true)]
+           [ValidateRange(0, 100)]
+           [int]$Level
+       )
+
+       $initial = [Math]::Max(0, $Level - 10)
+       $wmi = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods
+       # Execution logic...
+   }
+   ```
+
+---
+
+## 5. Schema Evolution & Backward Compatibility
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Need for explicit header directives (e.g. `# shyena:v1`);
+- Graceful handling of unknown configuration directives;
+- Migration strategies for legacy configuration files;
+
+---
+
+## 6. File I/O Subsystem
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Zero-copy file access using Win32 memory-mapped files (`CreateFileW` + `CreateFileMappingW` + `MapViewOfFile`) vs standard file reads;
+- Buffer caching strategies for near-instantaneous process cold starts;
+- Thread safety and file locking semantics when reading active user configuration;
+
+---
+
+## 7. Parser Engine
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Single-pass zero-copy scanner vs parser combinators (`winnow`);
+- Extracting top-level `Register-App` declarations without full PowerShell syntax evaluation;
+- Extracting function blocks via balanced brace scanning (`{` ... `}`) while leaving internal scripts untouched for PowerShell runtime execution;
+
+---
+
+## 8. Process Lifecycle & Windows System Integration
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Running as an interactive desktop background process without opening persistent console windows;
+- Avoiding Session 0 isolation issues associated with standard Windows Services (`services.msc`);
+- Registering global keyboard shortcuts via Win32 `RegisterHotKey` or low-level keyboard hooks (`WH_KEYBOARD_LL`);
+- Logon autostart strategy (Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` vs Scheduled Task with interactive elevation);
+
+---
+
+## 9. Error Diagnostics & Visual Reporting
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Layout and styling of in-place error presentation inside the search bar interface;
+- Handling configuration syntax/parse errors gracefully during startup and reloading;
+- Capturing PowerShell execution errors/tracebacks and presenting them cleanly with `[Esc]` dismissal behavior;
+
+---
+
+## 10. Configuration Hot-Reloading
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- In-memory reload triggered by a reserved `#config-reload` action;
+- Automated background filesystem watching using Win32 `ReadDirectoryChangesW`;
+- Debounce mechanisms to prevent parsing intermediate write states;
+
+---
+
+## 11. Installation & System Provisioning
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Clean, one-liner PowerShell installation script (`install.ps1`);
+- Deterministic installation directories (e.g. `%LOCALAPPDATA%\shyena\`);
+- Seeding default `.shyena` configuration templates upon initial installation;
+
+---
+
+## 12. Update Mechanism
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- In-place binary replacement strategy on Windows without encountering locked-executable errors (`ERROR_ACCESS_DENIED`);
+- Release asset verification and automated fetching from release channels;
+
+---
+
+## 13. Uninstallation & System Cleanup
+
+*Status: Not Yet Decided*
+
+### Architectural Considerations
+- Dedicated uninstallation script (`uninstall.ps1`);
+- Complete removal of autostart keys, registered shortcuts, cached binaries, and configuration folders;
