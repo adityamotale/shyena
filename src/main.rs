@@ -7,6 +7,7 @@ use global_hotkey::{
 use gpui::*;
 
 mod config;
+mod exec;
 mod theme;
 use theme::Mocha as Theme;
 
@@ -113,8 +114,8 @@ mod platform {
 
 #[derive(Clone, Debug)]
 pub struct PsTask {
-    pub function_def: String,
     pub function_name: String,
+    pub function_body: String,
     pub dynamic_tokens: Vec<String>,
 }
 
@@ -127,77 +128,9 @@ fn spawn_powershell_worker(rx: Receiver<PsTask>) {
 }
 
 fn execute_powershell_task(task: PsTask) {
-    let mut ps_script = format!("{}\n{} ", task.function_def, task.function_name);
-
-    for token in task.dynamic_tokens {
-        // Escape single quotes by doubling them for PowerShell
-        let safe_token = token.replace('\'', "''");
-        ps_script.push_str(&format!("'{}' ", safe_token));
-    }
-
-    let encoded = config::encode_powershell_script(&ps_script);
-
-    #[cfg(target_os = "windows")]
-    use std::os::windows::process::CommandExt;
-
-    // If script explicitly references legacy WMI cmdlets unavailable in PowerShell Core,
-    // invoke Windows PowerShell 5.1 directly for immediate native execution.
-    let prefer_windows_powershell = ps_script.contains("Get-WmiObject")
-        || ps_script.contains("Set-WmiInstance")
-        || ps_script.contains("WmiMonitorBrightness");
-
-    let primary_binary = if prefer_windows_powershell { "powershell" } else { "pwsh" };
-    let fallback_binary = if prefer_windows_powershell { "pwsh" } else { "powershell" };
-
-    let mut cmd = std::process::Command::new(primary_binary);
-    cmd.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-EncodedCommand",
-        &encoded,
-    ]);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x0800_0000);
-
-    let output = cmd.output();
-    let failed = match &output {
-        Ok(out) => !out.status.success() || !out.stderr.is_empty(),
-        Err(_) => true,
-    };
-
-    if failed {
-        if let Ok(out) = &output {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !stderr.trim().is_empty() {
-                eprintln!("{primary_binary} failed: {stderr}");
-            }
-        }
-        let mut fallback = std::process::Command::new(fallback_binary);
-        fallback.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-EncodedCommand",
-            &encoded,
-        ]);
-        #[cfg(target_os = "windows")]
-        fallback.creation_flags(0x0800_0000);
-        match fallback.output() {
-            Ok(fb_out) => {
-                if !fb_out.status.success() {
-                    let stderr = String::from_utf8_lossy(&fb_out.stderr);
-                    if !stderr.trim().is_empty() {
-                        eprintln!("{fallback_binary} fallback failed: {stderr}");
-                    }
-                }
-            }
-            Err(err) => {
-                eprintln!("Failed to spawn {fallback_binary} fallback: {err}");
-            }
-        }
+    let args: Vec<&str> = task.dynamic_tokens.iter().map(|s| s.as_str()).collect();
+    if let Err(err) = exec::dispatch_ps_function(&task.function_name, &task.function_body, &args) {
+        eprintln!("{err}");
     }
 }
 
@@ -349,15 +282,9 @@ impl SearchBar {
             }
             ActionKind::Ps => {
                 if let Some(ps) = self.config.ps.get(&action.key) {
-                    let function_def = ps
-                        .script
-                        .strip_suffix(&format!("\r\n{} @args", action.key))
-                        .or_else(|| ps.script.strip_suffix(&format!("\n{} @args", action.key)))
-                        .unwrap_or(&ps.script)
-                        .to_string();
                     let task = PsTask {
-                        function_def,
                         function_name: action.key.clone(),
+                        function_body: ps.body.clone(),
                         dynamic_tokens: dynamic_args.to_vec(),
                     };
                     let _ = self.ps_sender.send_blocking(task);

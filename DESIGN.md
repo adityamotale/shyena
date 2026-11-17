@@ -212,8 +212,13 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 - **DWM Frame & Geometry**: `DwmExtendFrameIntoClientArea` with 1px margin triggers Windows
   hardware drop shadow; `DWMWCP_DONOTROUND` enforces 0px sharp corners; `HWND_TOPMOST` maintains
   foreground window focus;
-- **Detached Execution**: Worker thread processes `PsTask` queue, spawning `pwsh` with
-  `CREATE_NO_WINDOW` (`0x0800_0000`) and automatic fallback to `powershell`;
+- **Diagnostic-Aware Execution**: Worker thread processes `PsTask` queue by constructing a
+  self-contained execution block (`& { function ... }`); strictly encodes the payload to
+  UTF-16LE Base64 and executes via `pwsh` (fallback to `powershell`) using `-ExecutionPolicy Bypass`
+  and `CREATE_NO_WINDOW` (`0x0800_0000`);
+- **Error Surfacing**: Instead of detached 'fire-and-forget' spawning, the worker awaits `.output()`
+  to capture `stderr`, preventing silent failures and passing localized PowerShell errors back
+  to the UI diagnostic overlay;
 - **Native Process Spawn**: Direct invocation of binary paths with static and dynamic arguments
   via `std::process::Command::spawn()`;
 

@@ -30,6 +30,7 @@ pub struct AppAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PsAction {
     pub script: String,
+    pub body: String,
 }
 
 impl Config {
@@ -58,7 +59,7 @@ impl Config {
         for func in &ast.functions {
             let name = func.name.to_string();
             let script = format!("function {} {}\n{} @args", name, func.block_span, name);
-            ps.insert(name, PsAction { script });
+            ps.insert(name, PsAction { script, body: func.block_span.to_string() });
         }
 
         Config { apps, ps }
@@ -123,7 +124,7 @@ impl From<ConfigSnapshot> for Config {
 
         for func in snapshot.functions {
             let script = format!("function {} {}\n{} @args", func.name, func.block_span, func.name);
-            ps.insert(func.name, PsAction { script });
+            ps.insert(func.name, PsAction { script, body: func.block_span });
         }
 
         Config { apps, ps }
