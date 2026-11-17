@@ -130,7 +130,23 @@ fn spawn_powershell_worker(rx: Receiver<PsTask>) {
 fn execute_powershell_task(task: PsTask) {
     let args: Vec<&str> = task.dynamic_tokens.iter().map(|s| s.as_str()).collect();
     if let Err(err) = exec::dispatch_ps_function(&task.function_name, &task.function_body, &args) {
-        eprintln!("{err}");
+        // Log to file since stdout/stderr are hidden in Windows GUI apps
+        let log_path = std::env::temp_dir().join("shyena-ps-error.log");
+        let _ = std::fs::write(
+            &log_path, 
+            format!("Error in {}:\n{}", task.function_name, err)
+        );
+        eprintln!("Logged error to {:?}: {}", log_path, err);
+    }
+}
+
+/// Hidden window that keeps GPUI's run loop (and the PowerShell worker) alive
+/// after the launcher window is dismissed.
+struct AnchorWindow;
+
+impl Render for AnchorWindow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
     }
 }
 
@@ -395,7 +411,17 @@ impl Render for SearchBar {
                     }
                     "tab" => {
                         if let Some(candidate) = this.filtered_actions.get(this.selected_index) {
-                            this.query = format!("{} ", candidate.key);
+                            // Keep the active @/# scope so dynamic args still resolve
+                            // to the same action when Enter is pressed.
+                            let scope = this
+                                .query
+                                .trim_start()
+                                .chars()
+                                .next()
+                                .filter(|c| *c == '@' || *c == '#')
+                                .map(|c| c.to_string())
+                                .unwrap_or_default();
+                            this.query = format!("{}{} ", scope, candidate.key);
                             this.update_filtered_actions(window);
                             cx.notify();
                         }
@@ -411,13 +437,16 @@ impl Render for SearchBar {
                     _ => {
                         if let Some(ch) = &event.keystroke.key_char {
                             this.query.push_str(ch);
-                            this.update_filtered_actions(window);
-                            cx.notify();
+                        } else if event.keystroke.key == "space" {
+                            // GPUI reports Space as the immutable key "space" with no key_char.
+                            this.query.push(' ');
                         } else if event.keystroke.key.chars().count() == 1 {
                             this.query.push_str(&event.keystroke.key);
-                            this.update_filtered_actions(window);
-                            cx.notify();
+                        } else {
+                            return;
                         }
+                        this.update_filtered_actions(window);
+                        cx.notify();
                     }
                 }
             }))
@@ -734,6 +763,25 @@ fn main() {
                 )),
             ])
             .expect("Failed to register GeistMono Nerd Font");
+
+        // GPUI quits when its last window closes. Keep an invisible 1x1 window
+        // open so the background PowerShell worker survives launcher dismissal.
+        let _anchor = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: point(px(0.0), px(0.0)),
+                        size: size(px(1.0), px(1.0)),
+                    })),
+                    titlebar: None,
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    show: false,
+                    kind: WindowKind::PopUp,
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| AnchorWindow),
+            )
+            .expect("Failed to create anchor window");
 
         let (tx, rx): (Sender<()>, Receiver<()>) = async_channel::unbounded();
         let (ps_tx, ps_rx): (Sender<PsTask>, Receiver<PsTask>) = async_channel::unbounded();
