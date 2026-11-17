@@ -79,7 +79,7 @@ Queries follow a clean tokenizer contract:
 Shyena uses a dedicated configuration file format based on valid PowerShell syntax, removing TOML multi-line escaping overhead.
 
 ### Target Path
-- Primary path: `~/.config/.shyena` (or `~/.config/.shyena.ps1`);
+- Primary path: `~/.config/.shyena`;
 
 ### Language Construct Rules
 1. **Application Registration (`Register-App`)**:
@@ -125,7 +125,7 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
 
 ### Finalized Architecture: Raw Win32 Single-Pass Buffered Read
 
-The configuration pipeline targets `~/.config/.shyena` (fallback `~/.config/.shyena.ps1`),
+The configuration pipeline targets `~/.config/.shyena`,
 housing native PowerShell definitions (`Register-App` and `function <name>`);
 sub-millisecond cold start and `#config-reload` latency are primary design objectives
 
