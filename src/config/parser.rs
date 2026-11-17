@@ -266,6 +266,8 @@ impl<'a> Scanner<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigReader;
+    use std::fs;
 
     #[test]
     fn test_parse_register_app_and_function() {
@@ -349,5 +351,122 @@ Register-App 'app''name' @{
         let src = "InvalidKeyword 'code' @{}";
         let err = Scanner::new(src).parse().expect_err("should fail");
         assert_eq!(err.message, "Unknown top-level directive");
+    }
+
+    #[test]
+    fn test_tricky_braces_in_strings_and_comments() {
+        let src = r#"
+# shyena:v1
+Register-App 'code' @{
+    Path = 'C:/Program Files/Code.exe'
+    Args = @('--flag={unclosed', 'escaped''quote}')
+}
+
+<# Block comment with stray braces: {{{ #>
+function complex_fn {
+    # Line comment with stray brace: }
+    $double = "escaped quote `" and brace } inside"
+    $single = 'literal backtick ` and brace {'
+    if ($true) {
+        Write-Output "nested ok"
+    }
+}
+"#;
+        let ast = Scanner::new(src).parse().expect("valid config must parse");
+        assert_eq!(ast.apps.len(), 1);
+        assert_eq!(ast.apps[0].name, "'code'");
+        assert!(ast.apps[0].block_span.starts_with('{'));
+        assert!(ast.apps[0].block_span.ends_with('}'));
+
+        assert_eq!(ast.functions.len(), 1);
+        assert_eq!(ast.functions[0].name, "complex_fn");
+        assert!(ast.functions[0].block_span.ends_with('}'));
+    }
+
+    #[test]
+    fn test_case_insensitivity_and_diagnostics() {
+        let valid = "register-app \"wt\" @{ Path = 'wt.exe' }\nFUNCTION ping-host { ping 1.1.1.1 }";
+        let ast = Scanner::new(valid).parse().unwrap();
+        assert_eq!(ast.apps.len(), 1);
+        assert_eq!(ast.functions.len(), 1);
+
+        // Unclosed brace on line 2
+        let unclosed = "Register-App 'a' @{ Path = 'a.exe' }\nfunction broken {\n    $x = 1\n";
+        let err = Scanner::new(unclosed).parse().unwrap_err();
+        assert_eq!(err.message, "Unterminated block: missing '}'");
+        assert_eq!(err.line, 4);
+
+        // Missing @{ hashtable
+        let bad_app = "Register-App 'a' { Path = 'a.exe' }";
+        let err = Scanner::new(bad_app).parse().unwrap_err();
+        assert_eq!(err.message, "Expected @{ after Register-App name");
+        assert_eq!(err.line, 1);
+    }
+
+    #[test]
+    fn test_e2e_io_to_parser_pipeline() {
+        let path = std::env::temp_dir().join(format!("shyena_e2e_{}.shyena", std::process::id()));
+        let content = "\u{FEFF}Register-App 'term' @{ Path = 'wt.exe' }\nfunction hi { 'hello }' }";
+        fs::write(&path, content).unwrap();
+
+        let mut reader = ConfigReader::new(&path);
+        let slice = reader.read().unwrap();
+        let ast = Scanner::new(slice).parse().unwrap();
+
+        assert_eq!(ast.apps.len(), 1);
+        assert_eq!(ast.functions.len(), 1);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_unterminated_string_literal() {
+        let single_err = Scanner::new("Register-App 'unterminated").parse().unwrap_err();
+        assert_eq!(single_err.message, "Unterminated string literal");
+
+        let double_err = Scanner::new("Register-App 'a' @{ Path = \"unterminated }\n").parse().unwrap_err();
+        assert_eq!(double_err.message, "Unterminated string literal");
+    }
+
+    #[test]
+    fn test_crlf_diagnostics_and_multiline() {
+        let src = "Register-App 'test' @{\r\n    Path = 'a.exe'\r\n}\r\nfunction bad {\r\n";
+        let err = Scanner::new(src).parse().unwrap_err();
+        assert_eq!(err.message, "Unterminated block: missing '}'");
+        assert_eq!(err.line, 5);
+    }
+
+    #[test]
+    fn test_empty_and_comment_only_sources() {
+        let empty = "";
+        let ast = Scanner::new(empty).parse().unwrap();
+        assert!(ast.apps.is_empty() && ast.functions.is_empty());
+
+        let comments_only = "   \r\n\t# single line\r\n<# block comment\r\nmultiline #>\r\n";
+        let ast2 = Scanner::new(comments_only).parse().unwrap();
+        assert!(ast2.apps.is_empty() && ast2.functions.is_empty());
+    }
+
+    #[test]
+    fn test_function_identifier_variants() {
+        let src = "function git-checkout_branch-1 { git checkout $args }";
+        let ast = Scanner::new(src).parse().unwrap();
+        assert_eq!(ast.functions.len(), 1);
+        assert_eq!(ast.functions[0].name, "git-checkout_branch-1");
+    }
+
+    #[test]
+    fn test_app_unquoted_name_edge_cases() {
+        let app_double = AppDef { name: "\"app\"", block_span: "{}" };
+        assert_eq!(app_double.unquoted_name(), "app");
+
+        let app_single = AppDef { name: "'app'", block_span: "{}" };
+        assert_eq!(app_single.unquoted_name(), "app");
+
+        let app_empty_quote = AppDef { name: "''", block_span: "{}" };
+        assert_eq!(app_empty_quote.unquoted_name(), "");
+
+        let app_bare = AppDef { name: "bare_token", block_span: "{}" };
+        assert_eq!(app_bare.unquoted_name(), "bare_token");
     }
 }

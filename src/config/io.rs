@@ -170,47 +170,106 @@ impl ConfigReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::fs::{self, OpenOptions};
+    use std::os::windows::fs::OpenOptionsExt;
 
-    #[test]
-    fn test_fast_path_and_bom_stripping() {
-        let dir = std::env::temp_dir();
-        let file_path = dir.join("shyena_io_unit_test_small.shyena");
-        let payload = "\u{FEFF}Register-App 'code' @{ Path = 'Code.exe' }\n";
-        fs::write(&file_path, payload).unwrap();
-
-        let mut reader = ConfigReader::new(&file_path);
-        let text = reader.read().expect("read should succeed");
-        assert_eq!(text, "Register-App 'code' @{ Path = 'Code.exe' }\n");
-
-        let _ = fs::remove_file(&file_path);
+    fn temp_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("shyena_test_{}_{}.shyena", std::process::id(), name))
     }
 
     #[test]
-    fn test_slow_path_resize_above_64kb() {
-        let dir = std::env::temp_dir();
-        let file_path = dir.join("shyena_io_unit_test_large.shyena");
-        let large_payload = "a".repeat(DEFAULT_CAPACITY + 10_000);
-        fs::write(&file_path, &large_payload).unwrap();
+    fn test_fast_path_bom_and_shrink_reuse() {
+        let path = temp_test_path("shrink_reuse");
+        let large = format!("\u{FEFF}Register-App 'code' @{{ Path = '{}' }}\n", "x".repeat(4096));
+        fs::write(&path, &large).unwrap();
 
-        let mut reader = ConfigReader::new(&file_path);
-        let text = reader.read().expect("large read should resize and succeed");
-        assert_eq!(text.len(), large_payload.len());
-        assert_eq!(text, large_payload);
+        let mut reader = ConfigReader::new(&path);
+        let first = reader.read().unwrap();
+        assert!(!first.starts_with('\u{FEFF}'));
+        assert_eq!(first.len(), large.len() - 3);
 
-        let _ = fs::remove_file(&file_path);
+        // Overwrite with smaller payload to verify stale bytes are not leaked
+        let small = "Register-App 'wt' @{ Path = 'wt.exe' }";
+        fs::write(&path, small).unwrap();
+        let second = reader.read().unwrap();
+        assert_eq!(second, small);
+
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
-    fn test_invalid_utf8_returns_error() {
-        let dir = std::env::temp_dir();
-        let file_path = dir.join("shyena_io_unit_test_bad_utf8.shyena");
-        fs::write(&file_path, [0xFF, 0xFE, 0xFD]).unwrap();
+    fn test_exact_64kb_and_slow_path_resize() {
+        let path = temp_test_path("boundary_64kb");
 
-        let mut reader = ConfigReader::new(&file_path);
-        let err = reader.read().expect_err("invalid UTF-8 must fail");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // Exact 64 KB boundary
+        let exact = "a".repeat(DEFAULT_CAPACITY);
+        fs::write(&path, &exact).unwrap();
+        let mut reader = ConfigReader::new(&path);
+        assert_eq!(reader.read().unwrap().len(), DEFAULT_CAPACITY);
 
-        let _ = fs::remove_file(&file_path);
+        // Above 64 KB (triggers Pass 2 GetFileSizeEx + resize)
+        let over = "b".repeat(DEFAULT_CAPACITY + 12_345);
+        fs::write(&path, &over).unwrap();
+        assert_eq!(reader.read().unwrap(), over);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_concurrent_editor_lock_compatibility() {
+        let path = temp_test_path("share_lock");
+        fs::write(&path, "Register-App 'app' @{ Path = 'app.exe' }").unwrap();
+
+        // Simulate an editor holding the file open with write + delete sharing
+        let _editor_handle = OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&path)
+            .unwrap();
+
+        let mut reader = ConfigReader::new(&path);
+        assert!(reader.read().is_ok());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_io_error_variants() {
+        let missing = temp_test_path("does_not_exist");
+        let mut reader = ConfigReader::new(&missing);
+        assert_eq!(reader.read().unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        let bad_utf8 = temp_test_path("bad_utf8");
+        fs::write(&bad_utf8, &[0xFF, 0xFE, 0xFD]).unwrap();
+        let mut reader = ConfigReader::new(&bad_utf8);
+        assert_eq!(reader.read().unwrap_err().kind(), io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_file(&bad_utf8);
+    }
+
+    #[test]
+    fn test_empty_file_returns_empty_slice() {
+        let path = temp_test_path("empty_file");
+        fs::write(&path, b"").unwrap();
+
+        let mut reader = ConfigReader::new(&path);
+        let content = reader.read().unwrap();
+        assert_eq!(content, "");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_slow_path_with_bom() {
+        let path = temp_test_path("slow_path_bom");
+        let payload = format!("\u{FEFF}{}", "c".repeat(DEFAULT_CAPACITY + 0x1000));
+        fs::write(&path, &payload).unwrap();
+
+        let mut reader = ConfigReader::new(&path);
+        let content = reader.read().unwrap();
+        assert!(!content.starts_with('\u{FEFF}'));
+        assert_eq!(content.len(), DEFAULT_CAPACITY + 0x1000);
+
+        let _ = fs::remove_file(&path);
     }
 }
