@@ -113,8 +113,9 @@ mod platform {
 
 #[derive(Clone, Debug)]
 pub struct PsTask {
-    pub script: String,
-    pub args: Vec<String>,
+    pub function_def: String,
+    pub function_name: String,
+    pub dynamic_tokens: Vec<String>,
 }
 
 fn spawn_powershell_worker(rx: Receiver<PsTask>) {
@@ -126,28 +127,24 @@ fn spawn_powershell_worker(rx: Receiver<PsTask>) {
 }
 
 fn execute_powershell_task(task: PsTask) {
-    let mut script_buffer = String::from("$args = @(");
-    for (idx, arg) in task.args.iter().enumerate() {
-        if idx > 0x00 {
-            script_buffer.push_str(", ");
-        }
-        script_buffer.push('\'');
-        script_buffer.push_str(&arg.replace('\'', "''"));
-        script_buffer.push('\'');
-    }
-    script_buffer.push_str(");\n");
-    script_buffer.push_str(&task.script);
+    let mut ps_script = format!("{}\n{} ", task.function_def, task.function_name);
 
-    let encoded = config::encode_powershell_script(&script_buffer);
+    for token in task.dynamic_tokens {
+        // Escape single quotes by doubling them for PowerShell
+        let safe_token = token.replace('\'', "''");
+        ps_script.push_str(&format!("'{}' ", safe_token));
+    }
+
+    let encoded = config::encode_powershell_script(&ps_script);
 
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
     // If script explicitly references legacy WMI cmdlets unavailable in PowerShell Core,
     // invoke Windows PowerShell 5.1 directly for immediate native execution.
-    let prefer_windows_powershell = script_buffer.contains("Get-WmiObject")
-        || script_buffer.contains("Set-WmiInstance")
-        || script_buffer.contains("WmiMonitorBrightness");
+    let prefer_windows_powershell = ps_script.contains("Get-WmiObject")
+        || ps_script.contains("Set-WmiInstance")
+        || ps_script.contains("WmiMonitorBrightness");
 
     let primary_binary = if prefer_windows_powershell { "powershell" } else { "pwsh" };
     let fallback_binary = if prefer_windows_powershell { "pwsh" } else { "powershell" };
@@ -258,9 +255,14 @@ impl SearchBar {
 
     fn update_filtered_actions(&mut self, window: &mut Window) {
         let trimmed = self.query.trim();
-        let raw_token = trimmed.split_whitespace().next().unwrap_or("");
+        let mut tokens_iter = trimmed.split_whitespace();
+        let raw_token = tokens_iter.next().unwrap_or("");
 
-        let (filter_scope, target_token) = if let Some(stripped) = raw_token.strip_prefix('@') {
+        let (filter_scope, target_token) = if raw_token == "@" {
+            (Some(ActionKind::App), tokens_iter.next().unwrap_or(""))
+        } else if raw_token == "#" {
+            (Some(ActionKind::Ps), tokens_iter.next().unwrap_or(""))
+        } else if let Some(stripped) = raw_token.strip_prefix('@') {
             (Some(ActionKind::App), stripped)
         } else if let Some(stripped) = raw_token.strip_prefix('#') {
             (Some(ActionKind::Ps), stripped)
@@ -347,9 +349,16 @@ impl SearchBar {
             }
             ActionKind::Ps => {
                 if let Some(ps) = self.config.ps.get(&action.key) {
+                    let function_def = ps
+                        .script
+                        .strip_suffix(&format!("\r\n{} @args", action.key))
+                        .or_else(|| ps.script.strip_suffix(&format!("\n{} @args", action.key)))
+                        .unwrap_or(&ps.script)
+                        .to_string();
                     let task = PsTask {
-                        script: ps.script.clone(),
-                        args: dynamic_args.to_vec(),
+                        function_def,
+                        function_name: action.key.clone(),
+                        dynamic_tokens: dynamic_args.to_vec(),
                     };
                     let _ = self.ps_sender.send_blocking(task);
                 }
@@ -364,16 +373,22 @@ impl SearchBar {
         let trimmed = self.query.trim();
         if !trimmed.is_empty() {
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            let raw_key = tokens[0x00];
-            let clean_key = raw_key
-                .strip_prefix('@')
-                .or_else(|| raw_key.strip_prefix('#'))
-                .unwrap_or(raw_key);
-
-            let dynamic_args: Vec<String> = tokens[0x01..]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            let (clean_key, dynamic_args) = if (tokens[0x00] == "@" || tokens[0x00] == "#")
+                && tokens.len() > 0x01
+            {
+                (
+                    tokens[0x01],
+                    tokens[0x02..].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                )
+            } else {
+                let raw_key = tokens[0x00];
+                let clean = raw_key
+                    .strip_prefix('@')
+                    .or_else(|| raw_key.strip_prefix('#'))
+                    .unwrap_or(raw_key);
+                let args = tokens[0x01..].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                (clean, args)
+            };
 
             if let Some(app) = self.config.apps.get(clean_key) {
                 let candidate = CandidateAction {
