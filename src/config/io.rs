@@ -26,30 +26,19 @@ impl Drop for FileHandle {
     }
 }
 
-/// Resolves the active Shyena configuration path (`~/.config/.shyena`, falling back
-/// to `~/.config/.shyena.ps1`). Returns the primary path if neither exists yet.
+/// Resolves the active Shyena configuration path (`~/.config/.shyena`).
 pub fn resolve_config_path() -> io::Result<PathBuf> {
     let home = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "USERPROFILE not set"))?;
 
-    let config_dir = home.join(".config");
-    let primary = config_dir.join(".shyena");
-    if primary.exists() {
-        return Ok(primary);
-    }
-
-    let fallback = config_dir.join(".shyena.ps1");
-    if fallback.exists() {
-        return Ok(fallback);
-    }
-
-    Ok(primary)
+    Ok(home.join(".config").join(".shyena"))
 }
 
 /// Low-latency, read-only configuration file reader backed by a pre-encoded UTF-16 path
 /// and a reusable heap buffer.
 pub struct ConfigReader {
+    #[allow(dead_code)]
     path: PathBuf,
     wide_path: Vec<u16>,
     buffer: Vec<u8>,
@@ -74,6 +63,7 @@ impl ConfigReader {
 
     /// Returns the filesystem path bound to this reader.
     #[inline]
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
