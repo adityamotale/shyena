@@ -238,12 +238,49 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 
 ## 10. Configuration Hot-Reloading
 
-*Status: Not Yet Decided*
+*Status: Implemented*
 
-### Architectural Considerations
-- In-memory reload triggered by a reserved `#config-reload` action;
-- Automated background filesystem watching using Win32 `ReadDirectoryChangesW`;
-- Debounce mechanisms to prevent parsing intermediate write states;
+### Architectural Design
+
+Shyena implements zero-dependency, low-latency configuration hot-reloading backed by native Win32
+`ReadDirectoryChangesW` directory monitoring and a dedicated trailing-edge debounce pipeline;
+it coordinates file system event listening, debounced parsing, and GPUI snapshot swaps.
+
+### Directory Watching & Atomic Save Resilience
+
+Modern code editors (VS Code, Neovim, Zed) save files via atomic swaps: writing to an ephemeral
+file before deleting/renaming the target; direct file handle watching fails across replacements.
+
+Shyena watches the parent directory (`~/.config/`) using `CreateFileW` with `FILE_LIST_DIRECTORY`,
+`OPEN_EXISTING`, and `FILE_FLAG_BACKUP_SEMANTICS`; notifications are received in a 4-byte aligned
+4 KB buffer (`[u32; 1024]`), filtering `FILE_NOTIFY_INFORMATION` records for `.shyena`.
+
+### Trailing-Edge Debouncing Pipeline
+
+Rapid write bursts (e.g. truncation followed by write and atomic rename within ~10 ms) are
+coalesced using a 75 ms trailing-edge debouncer on a dedicated background thread:
+
+1. **Burst Absorption**: An initial `FsChanged` arm resets a 75 ms timeout window;
+2. **Quiescence Execution**: Once the 75 ms window expires with no further I/O activity, the
+   debouncer invokes `ConfigReader::read()` and `Scanner::parse()`;
+3. **Owned Snapshot Conversion**: Borrows from `ConfigReader` are transformed into an owned
+   `ConfigSnapshot` (`OwnedAppDef`, `OwnedFunctionDef`) dispatched across an `async-channel`;
+4. **Diagnostic Isolation**: In case of I/O or `ParseError`, a `ReloadEvent::Error` variant is
+   emitted to display UI diagnostics while keeping the previous valid snapshot active.
+
+### Reserved `#config-reload` Command
+
+A thread-safe `ReloadTrigger` handle and reserved action string (`RESERVED_RELOAD_CMD = "config-reload"`)
+allow instant manual reloads without awaiting timer expiration.
+
+### Implementation Details
+- **Module Location**: `src/config/watcher.rs`, exposed via `src/config/mod.rs`;
+- **Core Types**:
+  - `ConfigSnapshot`: owned snapshot containing `apps: Vec<OwnedAppDef>` and `functions: Vec<OwnedFunctionDef>`;
+  - `ReloadError`: encapsulates I/O errors and zero-copy `ParseError` diagnostics;
+  - `ReloadEvent`: enum of `Updated(ConfigSnapshot)` and `Error(ReloadError)`;
+  - `ReloadTrigger`: `mpsc::Sender<WatchSignal>` wrapper for instantaneous manual triggers;
+  - `spawn_config_watcher()`: spawns watcher and debouncer threads, returning trigger and event receiver.
 
 ---
 
