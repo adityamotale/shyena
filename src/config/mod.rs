@@ -1,3 +1,8 @@
+#[allow(unused_imports, dead_code)]
+pub mod io;
+#[allow(unused_imports, dead_code)]
+pub use io::{resolve_config_path, ConfigReader};
+
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
