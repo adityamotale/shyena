@@ -138,20 +138,69 @@ fn execute_powershell_task(task: PsTask) {
     script_buffer.push_str(");\n");
     script_buffer.push_str(&task.script);
 
+    let encoded = config::encode_powershell_script(&script_buffer);
+
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
-    let mut cmd = std::process::Command::new("pwsh");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script_buffer]);
+    // If script explicitly references legacy WMI cmdlets unavailable in PowerShell Core,
+    // invoke Windows PowerShell 5.1 directly for immediate native execution.
+    let prefer_windows_powershell = script_buffer.contains("Get-WmiObject")
+        || script_buffer.contains("Set-WmiInstance")
+        || script_buffer.contains("WmiMonitorBrightness");
+
+    let primary_binary = if prefer_windows_powershell { "powershell" } else { "pwsh" };
+    let fallback_binary = if prefer_windows_powershell { "pwsh" } else { "powershell" };
+
+    let mut cmd = std::process::Command::new(primary_binary);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        &encoded,
+    ]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x0800_0000);
 
-    if cmd.status().is_err() {
-        let mut fallback = std::process::Command::new("powershell");
-        fallback.args(["-NoProfile", "-NonInteractive", "-Command", &script_buffer]);
+    let output = cmd.output();
+    let failed = match &output {
+        Ok(out) => !out.status.success() || !out.stderr.is_empty(),
+        Err(_) => true,
+    };
+
+    if failed {
+        if let Ok(out) = &output {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stderr.trim().is_empty() {
+                eprintln!("{primary_binary} failed: {stderr}");
+            }
+        }
+        let mut fallback = std::process::Command::new(fallback_binary);
+        fallback.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encoded,
+        ]);
         #[cfg(target_os = "windows")]
         fallback.creation_flags(0x0800_0000);
-        let _ = fallback.status();
+        match fallback.output() {
+            Ok(fb_out) => {
+                if !fb_out.status.success() {
+                    let stderr = String::from_utf8_lossy(&fb_out.stderr);
+                    if !stderr.trim().is_empty() {
+                        eprintln!("{fallback_binary} fallback failed: {stderr}");
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Failed to spawn {fallback_binary} fallback: {err}");
+            }
+        }
     }
 }
 
