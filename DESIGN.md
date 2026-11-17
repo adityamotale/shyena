@@ -120,12 +120,32 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
 
 ## 6. File I/O Subsystem
 
-*Status: Not Yet Decided*
+*Status: Implemented*
 
-### Architectural Considerations
-- Zero-copy file access using Win32 memory-mapped files (`CreateFileW` + `CreateFileMappingW` + `MapViewOfFile`) vs standard file reads;
-- Buffer caching strategies for near-instantaneous process cold starts;
-- Thread safety and file locking semantics when reading active user configuration;
+### Finalized Architecture: Raw Win32 Single-Pass Buffered Read
+
+The configuration pipeline targets `~/.config/.shyena` (fallback `~/.config/.shyena.ps1`),
+housing native PowerShell definitions (`Register-App` and `function <name>`);
+sub-millisecond cold start and `#config-reload` latency are primary design objectives
+
+Empirical benchmarks across 5 Win32 file-reading strategies on Windows 11 (NT 10.0.26200,
+Intel i5-10300H) yielded the following latency characteristics across 4 KB, 32 KB, and 256 KB:
+- **Raw Win32 Single-Pass Buffered Read**: 142.7 µs median at 4 KB (~28% faster than
+  `std::fs::read_to_string`); 203.5 µs median at 256 KB (>2x faster than `memmap2`);
+- **`memmap2` regression**: 433.2 µs at 256 KB caused by 0x40 minor page faults and
+  `UnmapViewOfFile` TLB shootdowns; memory mapping is strictly avoided;
+- **`std::fs` overhead**: eliminates redundant `GetFileInformationByHandleEx` metadata queries
+  on the hot path by speculatively issuing a single `ReadFile` into a pre-allocated 64 KB buffer;
+
+### Implementation Details
+- **Sharing Semantics**: uses `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` to prevent
+  `ERROR_SHARING_VIOLATION` when external editors (VS Code, Neovim) perform atomic file swaps;
+- **Zero-Allocation Hot Path**: `ConfigReader` retains pre-encoded wide path (`Vec<u16>`) and
+  reusable heap buffer (`Vec<u8>`), returning borrowed `&str` for zero-copy parsing;
+- **Two-Pass Handling**: 64 KB fast path handles >99% of user configs in a single syscall;
+  slow path queries `GetFileSizeEx` and resizes buffer only when file size exceeds 64 KB;
+- **Sanitization**: strips UTF-8 byte order marks (`0xEF, 0xBB, 0xBF`) and validates UTF-8
+  in-place prior to parser consumption;
 
 ---
 
