@@ -1,12 +1,16 @@
-#[allow(unused_imports, dead_code)]
 pub mod io;
-#[allow(unused_imports, dead_code)]
-pub use io::{resolve_config_path, ConfigReader};
+pub mod parser;
+pub mod watcher;
 
 #[allow(unused_imports, dead_code)]
-pub mod parser;
+pub use io::{resolve_config_path, ConfigReader};
 #[allow(unused_imports, dead_code)]
 pub use parser::{AppDef, ConfigAst, FunctionDef, ParseError, Scanner};
+#[allow(unused_imports, dead_code)]
+pub use watcher::{
+    spawn_config_watcher, ConfigSnapshot, OwnedAppDef, OwnedFunctionDef, ReloadError,
+    ReloadEvent, ReloadTrigger, RESERVED_RELOAD_CMD,
+};
 
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
