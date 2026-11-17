@@ -151,12 +151,42 @@ Intel i5-10300H) yielded the following latency characteristics across 4 KB, 32 K
 
 ## 7. Parser Engine
 
-*Status: Not Yet Decided*
+*Status: Finalized*
 
-### Architectural Considerations
-- Single-pass zero-copy scanner vs parser combinators (`winnow`);
-- Extracting top-level `Register-App` declarations without full PowerShell syntax evaluation;
-- Extracting function blocks via balanced brace scanning (`{` ... `}`) while leaving internal scripts untouched for PowerShell runtime execution;
+### Architectural Decision
+
+Shyena implements a **Hand-Rolled Zero-Copy Byte Scanner** operating directly over the UTF-8 `&str`
+provided by the Section 6 File I/O subsystem; it rejects parser combinator frameworks (`winnow`,
+`nom`) to achieve sub-10 µs parsing latency, zero heap allocations, and zero external dependencies.
+
+### Parsing Strategy: Top-Level Extraction
+
+The engine does *not* build an Abstract Syntax Tree (AST) for the entire PowerShell language;
+instead, it performs **Top-Level Boundary Extraction**:
+
+1. **Directive Scanning**: Scans for `# shyena:v1` to establish schema rules;
+2. **Block Lexing**: Identifies `Register-App` and `function` keywords;
+3. **Zero-Copy Slicing**: Uses a string-, comment-, and escape-aware brace counter to find the
+   exact closing `}` of a block; it slices the original `&'a str` and passes the unmodified script
+   block to the PowerShell automation worker.
+
+### PowerShell Lexical Compliance Rules
+
+To accurately track balanced braces (`{` / `}`) without being tricked by characters inside strings
+or comments, the scanner strictly implements these PowerShell escaping rules:
+
+* **Double-Quoted Strings (`"..."`)**: Can contain braces; the escape character is the backtick
+  (``` ` ```); an escaped quote (``` `" ```) does not terminate the string;
+* **Single-Quoted Strings (`'...'`)**: Can contain braces; backticks are literal here; the escape
+  sequence is a doubled single quote (`''`);
+* **Line Comments (`#`)**: Terminate at `\n` or `\r\n`;
+* **Block Comments (`<# ... #>`)**: Can span multiple lines and swallow braces.
+
+### Diagnostic Subsystem (Section 9 Integration)
+
+The parser tracks `line`, `column`, and `byte_offset`; when encountering a malformed `Register-App`
+hashtable or an unclosed function block, it yields a `ParseError` containing the exact span,
+allowing the GPUI UI to render an inline red diagnostic banner without crashing the application.
 
 ---
 
