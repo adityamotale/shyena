@@ -36,12 +36,13 @@ It replaces shell alias scripts, hotkey daemons, and traditional Windows search 
 - Binary distributions must bundle license text within the distribution archive;
 
 ### Layout Geometry & Aesthetics
-- **Width**: `620.0 px` fixed width, centered horizontally;
-- **Base Height**: `54.0 px` bar height (header pill + input line);
+- **Width**: `660.0 px` fixed width, centered horizontally;
+- **Base Height**: `62.0 px` bar height (header pill + input line);
 - **Candidate Row Height**: `32.0 px` per matched candidate item;
-- **Candidate Ceiling**: `MAX_VISIBLE_ITEMS: 0x05`; window dynamically resizes up to `215.0 px`;
+- **Candidate Ceiling**: `MAX_VISIBLE_ITEMS: 0x06`; window dynamically resizes up to `254.0 px`;
 - **Border Radius**: `0.0 px` sharp corners throughout container and list items;
-- **Color Palette**: High-contrast monochrome / slate aesthetic with distinct accents for `@app` and `#ps` scopes;
+- **Color Palette**: Catppuccin Mocha semantic token palette (dark matte default) with Latte support;
+  green accents for `@app` and search glyphs;
 
 ---
 
@@ -151,7 +152,7 @@ Intel i5-10300H) yielded the following latency characteristics across 4 KB, 32 K
 
 ## 7. Parser Engine
 
-*Status: Finalized*
+*Status: Implemented*
 
 ### Architectural Decision
 
@@ -184,21 +185,43 @@ or comments, the scanner strictly implements these PowerShell escaping rules:
 
 ### Diagnostic Subsystem (Section 9 Integration)
 
-The parser tracks `line`, `column`, and `byte_offset`; when encountering a malformed `Register-App`
+The parser tracks `line` and `col` coordinates; when encountering a malformed `Register-App`
 hashtable or an unclosed function block, it yields a `ParseError` containing the exact span,
 allowing the GPUI UI to render an inline red diagnostic banner without crashing the application.
+
+### Implementation Details
+- **Module Location**: `src/config/parser.rs`, exposed via `src/config/mod.rs`;
+- **Core Types**:
+  - `Scanner<'a>`: zero-copy parser maintaining `&'a str`, byte slice, line, and line start tracking;
+  - `ConfigAst<'a>`: contains extracted `apps: Vec<AppDef<'a>>` and `functions: Vec<FunctionDef<'a>>`;
+  - `AppDef<'a>`: stores raw literal name and unmodified hashtable block span; provides `unquoted_name()`;
+  - `FunctionDef<'a>`: stores function identifier and balanced `{ ... }` block span;
+  - `ParseError`: structured diagnostic carrying 1-based `line`, `col`, and static `message`;
+- **Zero Allocations on Hot Path**: string and block extraction produces borrowed slices (`&'a str`)
+  directly from the underlying buffer provided by `ConfigReader`;
 
 ---
 
 ## 8. Process Lifecycle & Windows System Integration
 
-*Status: Not Yet Decided*
+*Status: Partially Implemented*
 
-### Architectural Considerations
-- Running as an interactive desktop background process without opening persistent console windows;
-- Avoiding Session 0 isolation issues associated with standard Windows Services (`services.msc`);
-- Registering global keyboard shortcuts via Win32 `RegisterHotKey` or low-level keyboard hooks (`WH_KEYBOARD_LL`);
-- Logon autostart strategy (Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` vs Scheduled Task with interactive elevation);
+### Implemented Subsystems
+- **Global Hotkey Registration**: `global-hotkey` crate registers `Alt + Backquote` (`Alt + ~`) at
+  application initialization; background thread captures events and dispatches activation pulses;
+- **DWM Frame & Geometry**: `DwmExtendFrameIntoClientArea` with 1px margin triggers Windows
+  hardware drop shadow; `DWMWCP_DONOTROUND` enforces 0px sharp corners; `HWND_TOPMOST` maintains
+  foreground window focus;
+- **Detached Execution**: Worker thread processes `PsTask` queue, spawning `pwsh` with
+  `CREATE_NO_WINDOW` (`0x0800_0000`) and automatic fallback to `powershell`;
+- **Native Process Spawn**: Direct invocation of binary paths with static and dynamic arguments
+  via `std::process::Command::spawn()`;
+
+### Pending Considerations
+- Dedicated system tray icon and background daemon lifecycle without persistent console windows;
+- Avoiding Session 0 isolation issues during elevated background operation;
+- Logon autostart strategy (Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` vs
+  Scheduled Task with interactive elevation);
 
 ---
 
