@@ -8,6 +8,9 @@ gpui = "0.2.2"
 global-hotkey = "0.9.0"
 async-channel = "2.3"
 raw-window-handle = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+rustc-hash = "2.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
