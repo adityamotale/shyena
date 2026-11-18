@@ -1072,9 +1072,6 @@ fn main() {
                 std::borrow::Cow::Borrowed(include_bytes!(
                     "../assets/fonts/GeistMonoNerdFontMono-Regular.otf"
                 )),
-                std::borrow::Cow::Borrowed(include_bytes!(
-                    "../assets/fonts/GeistMonoNerdFontMono-Italic.otf"
-                )),
             ])
             .expect("Failed to register GeistMono Nerd Font");
 

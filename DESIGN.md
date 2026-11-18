@@ -21,7 +21,6 @@ It replaces shell alias scripts, hotkey daemons, and traditional Windows search 
 - Monospace font family: **GeistMono Nerd Font Mono** (400 weight only)
 - Asset layout under `assets/fonts/`:
   - `GeistMonoNerdFontMono-Regular.otf` — Regular base weight (400)
-  - `GeistMonoNerdFontMono-Italic.otf` — Italic base weight (400)
   - `LICENSE-GeistMono.txt` — SIL Open Font License 1.1 (OFL)
 
 ### In-Memory Font Loading
