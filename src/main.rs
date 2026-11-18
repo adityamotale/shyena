@@ -9,7 +9,7 @@ use gpui::*;
 mod config;
 mod exec;
 mod theme;
-use config::{ReloadTrigger, RESERVED_RELOAD_CMD};
+use config::{ConfigStore, ReloadOutcome, RESERVED_RELOAD_CMD};
 use theme::Theme;
 
 const WIN_WIDTH: f32 = 660.0;
@@ -265,7 +265,7 @@ struct SearchBar {
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     config: Arc<config::Config>,
     ps_sender: Sender<PsTask>,
-    reload_trigger: ReloadTrigger,
+    store: Rc<RefCell<ConfigStore>>,
     theme: Theme,
     selected_index: usize,
     filtered_actions: Vec<CandidateAction>,
@@ -277,13 +277,14 @@ impl SearchBar {
         window: &mut Window,
         cx: &mut Context<Self>,
         active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
-        config: Arc<config::Config>,
         ps_sender: Sender<PsTask>,
-        reload_trigger: ReloadTrigger,
-        theme: Theme,
+        store: Rc<RefCell<ConfigStore>>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
+
+        let config = store.borrow().current();
+        let theme = config.theme;
 
         platform::setup_window(window);
         let _ = platform::make_always_on_top(window);
@@ -307,7 +308,7 @@ impl SearchBar {
             active_window,
             config,
             ps_sender,
-            reload_trigger,
+            store,
             theme,
             selected_index: 0,
             filtered_actions: Vec::new(),
@@ -453,7 +454,7 @@ impl SearchBar {
         cx.notify();
     }
 
-    /// A successful hot reload replaces the snapshot and clears a config error.
+    /// A successful manual reload replaces the cached config and clears a config error.
     fn apply_config(
         &mut self,
         config: Arc<config::Config>,
@@ -620,9 +621,18 @@ impl SearchBar {
                 self.execute_action(&candidate, &args, window);
             }
             CommandTarget::Reload => {
-                self.reload_trigger.trigger_now();
-                *self.active_window.borrow_mut() = None;
-                window.remove_window();
+                let outcome = self.store.borrow_mut().reload();
+                match outcome {
+                    ReloadOutcome::Updated(config) => {
+                        let theme = config.theme;
+                        self.apply_config(config, theme, window, cx);
+                        *self.active_window.borrow_mut() = None;
+                        window.remove_window();
+                    }
+                    ReloadOutcome::Error(message) => {
+                        self.show_config_error(message, window, cx);
+                    }
+                }
             }
         }
     }
@@ -947,8 +957,15 @@ fn open_search_window(
     cx: &mut App,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     ps_sender: Sender<PsTask>,
-    reload_trigger: ReloadTrigger,
+    store: Rc<RefCell<ConfigStore>>,
 ) -> WindowHandle<SearchBar> {
+    // Healthy opens are pure memory. Retry the load only when the cached one
+    // failed, so a repaired config recovers on the next hotkey press.
+    let needs_reload = store.borrow().has_error();
+    if needs_reload {
+        let _ = store.borrow_mut().reload();
+    }
+
     let display = cx.displays().into_iter().next();
     let win_height = px(BAR_HEIGHT);
     let win_width = px(WIN_WIDTH);
@@ -984,26 +1001,14 @@ fn open_search_window(
 
     cx.activate(true);
     let active_ref = active_window.clone();
-    let reload_ref = reload_trigger.clone();
-    let (cfg, diagnostic) = config::Config::load_with_diagnostics();
-    let config = Arc::new(cfg);
-    let theme = config.theme;
+    let store_ref = store.clone();
     let handle = cx
-        .open_window(options, |window, cx| {
-            cx.new(|cx| {
-                SearchBar::new(
-                    window,
-                    cx,
-                    active_ref,
-                    config,
-                    ps_sender,
-                    reload_ref,
-                    theme,
-                )
-            })
+        .open_window(options, move |window, cx| {
+            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_sender, store_ref))
         })
         .unwrap();
 
+    let diagnostic = store.borrow().diagnostic().map(str::to_string);
     if let Some(message) = diagnostic {
         let _ = handle.update(cx, |bar, window, cx| {
             bar.show_config_error(message, window, cx);
@@ -1017,7 +1022,7 @@ fn toggle_search_window(
     cx: &mut App,
     active_window: &Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     ps_sender: &Sender<PsTask>,
-    reload_trigger: ReloadTrigger,
+    store: Rc<RefCell<ConfigStore>>,
 ) {
     let mut win_ref = active_window.borrow_mut();
     let mut was_open = false;
@@ -1034,12 +1039,8 @@ fn toggle_search_window(
 
     if !was_open {
         drop(win_ref);
-        let handle = open_search_window(
-            cx,
-            active_window.clone(),
-            ps_sender.clone(),
-            reload_trigger,
-        );
+        let handle =
+            open_search_window(cx, active_window.clone(), ps_sender.clone(), store);
         *active_window.borrow_mut() = Some(handle);
     }
 }
@@ -1075,6 +1076,12 @@ fn main() {
             ])
             .expect("Failed to register GeistMono Nerd Font");
 
+        // The launcher is long-running (started at login), so the config is
+        // read once here and every launcher open is served from memory.
+        let config_store = Rc::new(RefCell::new(ConfigStore::load(
+            config::Config::config_path(),
+        )));
+
         // GPUI quits when its last window closes. Keep an invisible 1x1 window
         // open so the background PowerShell worker survives launcher dismissal.
         let _anchor = cx
@@ -1100,15 +1107,6 @@ fn main() {
             async_channel::unbounded();
         spawn_powershell_worker(ps_rx, ps_err_tx);
 
-        // The watcher monitors the parent directory, so make sure it exists
-        // before the Win32 listener starts (a first launch may not have it yet).
-        let config_path = config::Config::config_path();
-        if let Some(parent) = config_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let (reload_trigger, reload_rx) =
-            config::spawn_config_watcher(config_path).expect("Failed to start config watcher");
-
         // Hotkey manager must stay alive for the lifetime of the application
         let hotkey_manager = setup_global_hotkey(tx);
         let active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>> =
@@ -1118,12 +1116,12 @@ fn main() {
         // the bar was already dismissed, open a fresh window in the error state.
         let error_window = active_window.clone();
         let error_ps_sender = ps_tx.clone();
-        let error_reload_trigger = reload_trigger.clone();
+        let error_config_store = config_store.clone();
         cx.spawn(async move |cx| {
             while let Ok(err) = ps_err_rx.recv().await {
                 let active = error_window.clone();
                 let ps_sender = error_ps_sender.clone();
-                let trigger = error_reload_trigger.clone();
+                let store = error_config_store.clone();
                 let message = err.message;
                 let _ = cx.update(move |cx| {
                     let handle = active.borrow().as_ref().cloned();
@@ -1134,7 +1132,7 @@ fn main() {
                                 cx,
                                 active.clone(),
                                 ps_sender.clone(),
-                                trigger.clone(),
+                                store.clone(),
                             );
                             *active.borrow_mut() = Some(handle.clone());
                             handle
@@ -1147,8 +1145,7 @@ fn main() {
                         })
                         .is_err()
                     {
-                        let handle =
-                            open_search_window(cx, active.clone(), ps_sender, trigger);
+                        let handle = open_search_window(cx, active.clone(), ps_sender, store);
                         *active.borrow_mut() = Some(handle.clone());
                         let _ = handle.update(cx, |bar, window, cx| {
                             bar.show_error(message, window, cx);
@@ -1159,86 +1156,18 @@ fn main() {
         })
         .detach();
 
-        // Live config changes: valid snapshots refresh the open bar, while any
-        // I/O or parse failure becomes a fatal config error panel.
-        let reload_event_window = active_window.clone();
-        let reload_event_ps_sender = ps_tx.clone();
-        let reload_event_trigger = reload_trigger.clone();
-        let reload_keepalive = reload_trigger.clone();
-        cx.spawn(async move |cx| {
-            let _trigger_keepalive = reload_keepalive;
-            while let Ok(event) = reload_rx.recv().await {
-                let active = reload_event_window.clone();
-                let ps_sender = reload_event_ps_sender.clone();
-                let trigger = reload_event_trigger.clone();
-                let _ = cx.update(move |cx| match event {
-                    config::ReloadEvent::Updated(snapshot) => {
-                        let cfg = Arc::new(config::Config::from(snapshot));
-                        let theme = cfg.theme;
-                        if let Some(handle) = active.borrow().as_ref().cloned() {
-                            if handle
-                                .update(cx, |bar, window, cx| {
-                                    bar.apply_config(cfg, theme, window, cx);
-                                })
-                                .is_err()
-                            {
-                                *active.borrow_mut() = None;
-                            }
-                        }
-                    }
-                    config::ReloadEvent::Error(err) => {
-                        let message = match err {
-                            config::ReloadError::Parse(parse_err) => parse_err.to_diagnostic(),
-                            config::ReloadError::Io(io_err) => format!(
-                                "~/.config/.shyena:1:1: error: failed to read config: {io_err}"
-                            ),
-                        };
-                        let handle = active.borrow().as_ref().cloned();
-                        let handle = match handle {
-                            Some(handle) => handle,
-                            None => {
-                                let handle = open_search_window(
-                                    cx,
-                                    active.clone(),
-                                    ps_sender.clone(),
-                                    trigger.clone(),
-                                );
-                                *active.borrow_mut() = Some(handle.clone());
-                                handle
-                            }
-                        };
-
-                        if handle
-                            .update(cx, |bar, window, cx| {
-                                bar.show_config_error(message.clone(), window, cx);
-                            })
-                            .is_err()
-                        {
-                            let handle =
-                                open_search_window(cx, active.clone(), ps_sender, trigger);
-                            *active.borrow_mut() = Some(handle.clone());
-                            let _ = handle.update(cx, |bar, window, cx| {
-                                bar.show_config_error(message, window, cx);
-                            });
-                        }
-                    }
-                });
-            }
-        })
-        .detach();
-
         let active_window_clone = active_window.clone();
         let ps_tx_clone = ps_tx.clone();
-        let hotkey_reload_trigger = reload_trigger.clone();
+        let hotkey_config_store = config_store.clone();
         cx.spawn(async move |cx| {
             // Keep hotkey_manager in the async task scope so it is never dropped
             let _manager = hotkey_manager;
             while let Ok(()) = rx.recv().await {
                 let active = active_window_clone.clone();
                 let ps_sender = ps_tx_clone.clone();
-                let trigger = hotkey_reload_trigger.clone();
+                let store = hotkey_config_store.clone();
                 let _ = cx.update(move |cx| {
-                    toggle_search_window(cx, &active, &ps_sender, trigger);
+                    toggle_search_window(cx, &active, &ps_sender, store);
                 });
             }
         })

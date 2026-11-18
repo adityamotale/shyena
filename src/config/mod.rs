@@ -1,16 +1,15 @@
 pub mod io;
 pub mod parser;
-pub mod watcher;
+pub mod store;
 
 #[allow(unused_imports, dead_code)]
 pub use io::{resolve_config_path, ConfigReader};
 #[allow(unused_imports, dead_code)]
 pub use parser::{AppDef, ConfigAst, FunctionDef, ParseError, Scanner};
-#[allow(unused_imports, dead_code)]
-pub use watcher::{
-    spawn_config_watcher, ConfigSnapshot, OwnedAppDef, OwnedFunctionDef, ReloadError,
-    ReloadEvent, ReloadTrigger, RESERVED_RELOAD_CMD,
-};
+pub use store::{ConfigStore, ReloadOutcome};
+
+/// Reserved command that re-reads the config from disk (`#config-reload`).
+pub const RESERVED_RELOAD_CMD: &str = "config-reload";
 
 use crate::theme::Theme;
 use rustc_hash::FxHashMap;
@@ -82,41 +81,6 @@ impl Config {
         }
     }
 
-    pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut reader = io::ConfigReader::new(path);
-        let content = reader.read()?;
-        let ast = parser::Scanner::new(content).parse()?;
-        Ok(Self::from_ast(&ast))
-    }
-
-    pub fn load() -> Self {
-        Self::load_with_diagnostics().0
-    }
-
-    /// Loads configuration and returns a rustc-style diagnostic on parse/IO errors.
-    /// On error, returns a fallback config (default/seeded) so the UI can still render
-    /// while displaying the diagnostic.
-    pub fn load_with_diagnostics() -> (Self, Option<String>) {
-        let path = Self::config_path();
-        if !path.exists() {
-            return (Self::create_default_config(&path), None);
-        }
-
-        let mut reader = io::ConfigReader::new(&path);
-        let content = match reader.read() {
-            Ok(s) => s,
-            Err(err) => {
-                let diag = format!("~/.config/.shyena:1:1: error: failed to read config: {err}");
-                return (Self::default(), Some(diag));
-            }
-        };
-
-        match parser::Scanner::new(content).parse() {
-            Ok(ast) => (Self::from_ast(&ast), None),
-            Err(err) => (Self::default(), Some(err.to_diagnostic())),
-        }
-    }
-
     /// Configuration seeded on first launch; also the canonical multi-arg example.
     const DEFAULT_SHYENA: &str = r#"# Shyena Configuration (~/.config/.shyena)
 
@@ -149,7 +113,7 @@ function brightness {
 }
 "#;
 
-    fn create_default_config(path: &Path) -> Self {
+    pub(crate) fn create_default_config(path: &Path) -> Self {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -159,28 +123,6 @@ function brightness {
         match ast {
             Ok(ref tree) => Self::from_ast(tree),
             Err(_) => Self::default(),
-        }
-    }
-}
-
-impl From<ConfigSnapshot> for Config {
-    fn from(snapshot: ConfigSnapshot) -> Self {
-        let mut apps = FxHashMap::default();
-        let mut ps = FxHashMap::default();
-
-        for app in snapshot.apps {
-            apps.insert(app.name, AppAction { path: app.path, args: app.args });
-        }
-
-        for func in snapshot.functions {
-            let script = format!("function {} {}\n{} @args", func.name, func.block_span, func.name);
-            ps.insert(func.name, PsAction { script, body: func.block_span });
-        }
-
-        Config {
-            apps,
-            ps,
-            theme: snapshot.theme,
         }
     }
 }
