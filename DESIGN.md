@@ -244,6 +244,9 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 
 *Status: Partially Implemented*
 
+**Platform Scope**: Shyena targets Windows 10/11 exclusively. The Win32 platform layer has no
+non-Windows fallback, so it is not `cfg`-gated.
+
 ### Implemented Subsystems
 - **Global Hotkey Registration**: `global-hotkey` crate registers `Alt + Backquote` (`Alt + ~`) at
   application initialization; background thread captures events and dispatches activation pulses;
@@ -268,6 +271,43 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
   pages are evicted, and the task skips the trim if a new window opened in the meantime. This
   reduces the resident working set only — committed memory and DirectX allocations are unchanged,
   and evicted pages are re-faulted on the next open;
+
+### Measured Resource Profile
+
+Release builds, Intel Core i5-10300H (4C/8T), Windows 11 build 26200, rustc 1.99.1. Each
+binary was measured in a fresh process after a 10 s settle; idle CPU is the
+`TotalProcessorTime` delta over 60 s; working set and handle samples are medians of three
+runs. The baseline is commit `ab47d86` (before the configuration, PowerShell and working-set
+work), rebuilt from source into an isolated target directory so both binaries are optimized
+builds of the same dependency graph.
+
+| Metric | Baseline `ab47d86` | Current `4a86a77` |
+|---|---|---|
+| Total process threads, idle | 9 | 7 |
+| Shyena-owned threads, idle | 4 (hotkey, config reloader, Win32 watcher, PS worker) | 1 (hotkey) |
+| Idle CPU, % of one core | 0.81 % | 0.68 % |
+| Idle CPU, % of system (8 logical) | 0.10 % | 0.08 % |
+| Working set, 10 s after start | 64.8 MB | 3.1 MB |
+| Working set, 5 s after dismiss | 74.1 MB | 0.6 MB |
+| Working set after 25 open/close cycles | 79.1 MB | 0.6 MB |
+| Private bytes, idle | 51.6 MB | 50.4 MB |
+| Handles, idle → after 25 cycles | 314 → 353 | 316 → 354 |
+| Config reads per healthy open | 0 (watcher-maintained cache) | 0 (startup cache) |
+| Threads during a PowerShell call | 13, constant (persistent worker) | +1 transient, back to idle |
+
+Total process threads and idle CPU are dominated by GPUI's VSync, background-work pool and
+DXGI/renderer threads, which stay resident in both builds; the table reports the shyena-owned
+share explicitly rather than attributing the whole process to the launcher. Trimmed pages are
+faulted back in on the next open, which is why private bytes and handle counts are unchanged
+by trimming while the resident set drops into the low megabytes. Trims are deferred (2 s after
+startup, 200 ms after dismissal) and skipped when a window reopened in between, so they never sit
+on the activation path.
+
+Config I/O was verified with an env-gated trace at the single read choke point
+(`ConfigStore::read_from_disk`): one read at startup, none across five healthy opens, one
+extra read per open while the cached diagnostic is set (recovery retry), and exactly one per
+`:reload`. The trace was removed before this profile was taken, so the listed numbers come
+from the shipped binary.
 
 ### Pending Considerations
 - Dedicated system tray icon and background daemon lifecycle without persistent console windows;
@@ -301,7 +341,8 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
   120 characters, and prefixed with the command name;
 - **Configuration errors**: `ConfigStore::load()` parse/IO failures are cached as a diagnostic and
   shown the first time the launcher opens; `:reload` failures render the same overlay, and a
-  successful reload clears it;
+  successful reload clears it. Because input is ignored in this state, `[Esc]` closes the launcher
+  and the next open retries the load, so repairing the file recovers without a restart;
 
 ---
 
@@ -314,7 +355,8 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 Shyena is a long-running, logon-started process, so the configuration is read exactly once during
 application initialization. The parsed `Config` is cached in memory (`ConfigStore`) and every
 launcher activation is served from that cache: opening the search window performs no filesystem I/O,
-spawns no watcher threads, and schedules no timers.
+spawns no watcher threads, and schedules no periodic timers (the one-shot working-set trims are
+described in §8).
 
 ### Initial Load & First-Run Seeding
 
