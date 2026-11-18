@@ -54,14 +54,25 @@ impl Config {
 
         for app in &ast.apps {
             let name = app.unquoted_name().to_string();
-            let (path, args) = parse_app_hashtable(app.block_span);
-            apps.insert(name, AppAction { path, args });
+            apps.insert(
+                name,
+                AppAction {
+                    path: app.path.clone(),
+                    args: app.args.clone(),
+                },
+            );
         }
 
         for func in &ast.functions {
             let name = func.name.to_string();
             let script = format!("function {} {}\n{} @args", name, func.block_span, name);
-            ps.insert(name, PsAction { script, body: func.block_span.to_string() });
+            ps.insert(
+                name,
+                PsAction {
+                    script,
+                    body: func.block_span.to_string(),
+                },
+            );
         }
 
         Config {
@@ -79,17 +90,30 @@ impl Config {
     }
 
     pub fn load() -> Self {
+        Self::load_with_diagnostics().0
+    }
+
+    /// Loads configuration and returns a rustc-style diagnostic on parse/IO errors.
+    /// On error, returns a fallback config (default/seeded) so the UI can still render
+    /// while displaying the diagnostic.
+    pub fn load_with_diagnostics() -> (Self, Option<String>) {
         let path = Self::config_path();
         if !path.exists() {
-            return Self::create_default_config(&path);
+            return (Self::create_default_config(&path), None);
         }
 
-        match Self::from_file(&path) {
-            Ok(cfg) => cfg,
+        let mut reader = io::ConfigReader::new(&path);
+        let content = match reader.read() {
+            Ok(s) => s,
             Err(err) => {
-                eprintln!("Failed to parse config at {:?}: {}", path, err);
-                Self::default()
+                let diag = format!("~/.config/.shyena:1:1: error: failed to read config: {err}");
+                return (Self::default(), Some(diag));
             }
+        };
+
+        match parser::Scanner::new(content).parse() {
+            Ok(ast) => (Self::from_ast(&ast), None),
+            Err(err) => (Self::default(), Some(err.to_diagnostic())),
         }
     }
 
@@ -145,8 +169,7 @@ impl From<ConfigSnapshot> for Config {
         let mut ps = FxHashMap::default();
 
         for app in snapshot.apps {
-            let (path, args) = parse_app_hashtable(&app.block_span);
-            apps.insert(app.name, AppAction { path, args });
+            apps.insert(app.name, AppAction { path: app.path, args: app.args });
         }
 
         for func in snapshot.functions {
@@ -201,139 +224,13 @@ pub fn encode_powershell_script(script: &str) -> String {
     out
 }
 
+/// Parses an app hashtable block using the strict scanner. Intended for compatibility/testing.
+/// Returns `(PathBuf, Vec<String>)` or defaults on parse error.
 pub fn parse_app_hashtable(span: &str) -> (PathBuf, Vec<String>) {
-    let mut path = PathBuf::new();
-    let mut args = Vec::new();
-
-    let bytes = span.as_bytes();
-    let len = bytes.len();
-    let mut i = 0x00;
-
-    while i < len {
-        while i < len && (bytes[i].is_ascii_whitespace() || bytes[i] == b';' || bytes[i] == b',') {
-            i += 0x01;
-        }
-        if i >= len {
-            break;
-        }
-
-        if bytes[i] == b'#' {
-            while i < len && bytes[i] != b'\n' {
-                i += 0x01;
-            }
-            continue;
-        }
-
-        let key_start = i;
-        while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-') {
-            i += 0x01;
-        }
-        let key = &span[key_start..i];
-
-        while i < len && bytes[i].is_ascii_whitespace() {
-            i += 0x01;
-        }
-        if i < len && bytes[i] == b'=' {
-            i += 0x01;
-        } else {
-            if key_start == i && i < len {
-                i += 0x01;
-            }
-            continue;
-        }
-
-        while i < len && bytes[i].is_ascii_whitespace() {
-            i += 0x01;
-        }
-        if i >= len {
-            break;
-        }
-
-        if key.eq_ignore_ascii_case("Path") {
-            if let Some((val, next_i)) = read_quoted_or_unquoted_string(span, i) {
-                path = PathBuf::from(val);
-                i = next_i;
-            }
-        } else if key.eq_ignore_ascii_case("Args") {
-            if (bytes[i] == b'@' && i + 0x01 < len && bytes[i + 0x01] == b'(') || bytes[i] == b'(' {
-                if bytes[i] == b'@' {
-                    i += 0x02;
-                } else {
-                    i += 0x01;
-                }
-                while i < len && bytes[i] != b')' {
-                    while i < len && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
-                        i += 0x01;
-                    }
-                    if i < len && bytes[i] == b')' {
-                        break;
-                    }
-                    if let Some((val, next_i)) = read_quoted_or_unquoted_string(span, i) {
-                        args.push(val);
-                        i = next_i;
-                    } else {
-                        i += 0x01;
-                    }
-                }
-                if i < len && bytes[i] == b')' {
-                    i += 0x01;
-                }
-            } else if let Some((val, next_i)) = read_quoted_or_unquoted_string(span, i) {
-                args.push(val);
-                i = next_i;
-            }
-        }
-    }
-
-    (path, args)
-}
-
-fn read_quoted_or_unquoted_string(src: &str, start: usize) -> Option<(String, usize)> {
-    let bytes = src.as_bytes();
-    let len = bytes.len();
-    if start >= len {
-        return None;
-    }
-
-    let quote = bytes[start];
-    if quote == b'\'' || quote == b'"' {
-        let mut i = start + 0x01;
-        let mut result = String::new();
-        while i < len {
-            if bytes[i] == quote {
-                if i + 0x01 < len && bytes[i + 0x01] == quote {
-                    result.push(quote as char);
-                    i += 0x02;
-                    continue;
-                }
-                i += 0x01;
-                return Some((result, i));
-            } else if quote == b'"' && bytes[i] == b'`' && i + 0x01 < len {
-                result.push(bytes[i + 0x01] as char);
-                i += 0x02;
-            } else {
-                result.push(bytes[i] as char);
-                i += 0x01;
-            }
-        }
-        Some((result, i))
-    } else {
-        let mut i = start;
-        let val_start = i;
-        while i < len
-            && !bytes[i].is_ascii_whitespace()
-            && bytes[i] != b';'
-            && bytes[i] != b','
-            && bytes[i] != b')'
-            && bytes[i] != b'}'
-        {
-            i += 0x01;
-        }
-        if i > val_start {
-            Some((src[val_start..i].to_string(), i))
-        } else {
-            None
-        }
+    let src = format!("Register-App 'x' @{}", span.trim());
+    match parser::Scanner::new(&src).parse() {
+        Ok(ast) if !ast.apps.is_empty() => (ast.apps[0].path.clone(), ast.apps[0].args.clone()),
+        _ => (PathBuf::new(), Vec::new()),
     }
 }
 

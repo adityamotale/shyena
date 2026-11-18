@@ -829,12 +829,22 @@ fn open_search_window(
 
     cx.activate(true);
     let active_ref = active_window.clone();
-    let config = Arc::new(config::Config::load());
+    let (cfg, diagnostic) = config::Config::load_with_diagnostics();
+    let config = Arc::new(cfg);
     let theme = config.theme;
-    cx.open_window(options, |window, cx| {
-        cx.new(|cx| SearchBar::new(window, cx, active_ref, config, ps_sender, theme))
-    })
-    .unwrap()
+    let handle = cx
+        .open_window(options, |window, cx| {
+            cx.new(|cx| SearchBar::new(window, cx, active_ref, config, ps_sender, theme))
+        })
+        .unwrap();
+
+    if let Some(message) = diagnostic {
+        let _ = handle.update(cx, |bar, window, cx| {
+            bar.show_error(message, window, cx);
+        });
+    }
+
+    handle
 }
 
 fn toggle_search_window(

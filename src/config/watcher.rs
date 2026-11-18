@@ -22,7 +22,8 @@ const WATCH_FILTERS: u32 =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedAppDef {
     pub name: String,
-    pub block_span: String,
+    pub path: PathBuf,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,8 +97,9 @@ fn execute_reload(reader: &mut ConfigReader) -> ReloadEvent {
                 .apps
                 .into_iter()
                 .map(|a| OwnedAppDef {
-                    name: a.unquoted_name().trim_matches(|c| c == '\'' || c == '"').to_string(),
-                    block_span: a.block_span.to_string(),
+                    name: a.unquoted_name().to_string(),
+                    path: a.path,
+                    args: a.args,
                 })
                 .collect();
 
@@ -360,6 +362,7 @@ mod tests {
         match event {
             ReloadEvent::Error(ReloadError::Parse(parse_err)) => {
                 assert!(parse_err.line >= 1);
+                assert!(!parse_err.to_diagnostic().is_empty());
             }
             other => panic!("expected ReloadEvent::Error(ParseError), got: {:?}", other),
         }

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::theme::Theme;
 
@@ -14,16 +15,69 @@ fn unquote_literal<'a>(lit: &'a str) -> &'a str {
     lit
 }
 
+fn decode_quoted_literal(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 2 {
+        return raw.to_string();
+    }
+    let quote = bytes[0];
+    if (quote != b'\'' && quote != b'"') || bytes[bytes.len() - 1] != quote {
+        return raw.to_string();
+    }
+    let inner = &raw[1..raw.len() - 1];
+    if quote == b'\'' {
+        // PowerShell single-quoted strings escape ' as ''
+        return inner.replace("''", "'");
+    }
+    // PowerShell double-quoted strings escape with backtick
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            } else {
+                out.push('`');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+const DIAGNOSTIC_PREFIX: &str = "~/.config/.shyena";
+const DIAGNOSTIC_MAX_CHARS: usize = 120;
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ParseError {
     pub line: u32,
     pub col: u32,
-    pub message: &'static str,
+    pub message: String,
+}
+
+impl ParseError {
+    pub fn to_diagnostic(&self) -> String {
+        let base = format!(
+            "{DIAGNOSTIC_PREFIX}:{}:{}: error: {}",
+            self.line, self.col, self.message
+        );
+        if base.chars().count() <= DIAGNOSTIC_MAX_CHARS {
+            base
+        } else {
+            let mut truncated: String = base
+                .chars()
+                .take(DIAGNOSTIC_MAX_CHARS.saturating_sub(3))
+                .collect();
+            truncated.push_str("...");
+            truncated
+        }
+    }
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.line, self.col, self.message)
+        write!(f, "{}", self.to_diagnostic())
     }
 }
 
@@ -33,6 +87,8 @@ impl std::error::Error for ParseError {}
 pub struct AppDef<'a> {
     pub name: &'a str,
     pub block_span: &'a str,
+    pub path: PathBuf,
+    pub args: Vec<String>,
 }
 
 impl<'a> AppDef<'a> {
@@ -142,10 +198,10 @@ impl<'a> Scanner<'a> {
 
     fn read_string_literal(&mut self) -> Result<&'a str, ParseError> {
         let Some(quote) = self.peek() else {
-            return Err(self.make_error("Expected string literal"));
+            return Err(self.make_error("expected string literal"));
         };
         if quote != b'\'' && quote != b'"' {
-            return Err(self.make_error("Expected string literal"));
+            return Err(self.make_error("expected string literal"));
         }
         let start = self.pos;
         self.advance();
@@ -175,14 +231,14 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        Err(self.make_error("Unterminated string literal"))
+        Err(self.make_error("unterminated string literal"))
     }
 
     /// Scans a balanced `{ ... }` block, correctly ignoring braces inside strings and comments.
     fn scan_balanced_block(&mut self) -> Result<&'a str, ParseError> {
         let start = self.pos;
         if self.peek() != Some(b'{') {
-            return Err(self.make_error("Expected '{'"));
+            return Err(self.make_error("expected '{'"));
         }
 
         let mut depth: u32 = 0;
@@ -214,7 +270,7 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        Err(self.make_error("Unterminated block: missing '}'"))
+        Err(self.make_error("unterminated block: missing '}'"))
     }
 
     pub fn parse(mut self) -> Result<ConfigAst<'a>, ParseError> {
@@ -230,14 +286,44 @@ impl<'a> Scanner<'a> {
                 break;
             }
 
+            let tok_pos = self.pos;
+            let tok_line = self.line;
+            let tok_line_start = self.line_start;
+            let Some(b) = self.peek() else { break };
+
+            if !(b.is_ascii_alphabetic() || b == b'_') {
+                return Err(self.error_at(
+                    tok_pos,
+                    tok_line,
+                    tok_line_start,
+                    format!("unexpected character '{}'", Self::token_display(b)),
+                ));
+            }
+
             let kw = self.read_identifier_or_keyword();
+            if kw.is_empty() {
+                return Err(self.error_at(
+                    tok_pos,
+                    tok_line,
+                    tok_line_start,
+                    format!("unexpected character '{}'", Self::token_display(b)),
+                ));
+            }
 
             if kw.eq_ignore_ascii_case("Set-Theme") {
                 self.skip_whitespace_and_comments();
+                let val_pos = self.pos;
+                let val_line = self.line;
+                let val_line_start = self.line_start;
                 let raw = self.read_string_literal()?;
                 let value = unquote_literal(raw);
                 let Some(theme) = Theme::from_config_str(value) else {
-                    return Err(self.make_error("Invalid theme: expected 'dark' or 'light'"));
+                    return Err(self.error_at(
+                        val_pos,
+                        val_line,
+                        val_line_start,
+                        "invalid theme: expected 'dark' or 'light'",
+                    ));
                 };
                 ast.theme = Some(theme);
             } else if kw.eq_ignore_ascii_case("Register-App") {
@@ -245,37 +331,226 @@ impl<'a> Scanner<'a> {
                 let name = self.read_string_literal()?;
 
                 self.skip_whitespace_and_comments();
-                // Handle @{ ... } hashtable syntax
                 if self.peek() == Some(b'@') && self.peek_next() == Some(b'{') {
-                    self.advance(); // consume '@'
-                    let block_span = self.scan_balanced_block()?;
-                    ast.apps.push(AppDef { name, block_span });
+                    self.advance(); // '@'
+                    let block_start = self.pos; // start at '{' for span compatibility
+                    self.advance(); // '{'
+                    let (path, args) = self.parse_app_hashtable_contents()?;
+                    let block_span = &self.src[block_start..self.pos];
+                    ast.apps.push(AppDef {
+                        name,
+                        block_span,
+                        path,
+                        args,
+                    });
                 } else {
-                    return Err(self.make_error("Expected @{ after Register-App name"));
+                    return Err(self.make_error("expected '@{' after Register-App name"));
                 }
             } else if kw.eq_ignore_ascii_case("function") {
                 self.skip_whitespace_and_comments();
+                let name_pos = self.pos;
+                let name_line = self.line;
+                let name_line_start = self.line_start;
                 let name = self.read_identifier_or_keyword();
                 if name.is_empty() {
-                    return Err(self.make_error("Expected function name"));
+                    return Err(self.error_at(
+                        name_pos,
+                        name_line,
+                        name_line_start,
+                        "expected function name",
+                    ));
                 }
 
                 self.skip_whitespace_and_comments();
                 let block_span = self.scan_balanced_block()?;
                 ast.functions.push(FunctionDef { name, block_span });
             } else {
-                return Err(self.make_error("Unknown top-level directive"));
+                return Err(self.error_at(
+                    tok_pos,
+                    tok_line,
+                    tok_line_start,
+                    format!("unexpected token '{kw}'"),
+                ));
             }
         }
 
         Ok(ast)
     }
 
-    fn make_error(&self, message: &'static str) -> ParseError {
+    /// Parse inside an app hashtable after consuming the opening '{' (the '@' and '{' already consumed).
+    /// Strictly allows only `Path` and `Args` keys with `=` assignment.
+    fn parse_app_hashtable_contents(&mut self) -> Result<(PathBuf, Vec<String>), ParseError> {
+        let mut path: Option<PathBuf> = None;
+        let mut args: Option<Vec<String>> = None;
+
+        loop {
+            self.skip_whitespace_and_comments();
+            let Some(b) = self.peek() else {
+                return Err(self.make_error("unterminated hashtable: missing '}'"));
+            };
+            if b == b'}' {
+                self.advance();
+                return Ok((path.unwrap_or_default(), args.unwrap_or_default()));
+            }
+
+            let key_pos = self.pos;
+            let key_line = self.line;
+            let key_line_start = self.line_start;
+            if !(b.is_ascii_alphabetic() || b == b'_') {
+                return Err(self.error_at(
+                    key_pos,
+                    key_line,
+                    key_line_start,
+                    format!("unexpected character '{}'", Self::token_display(b)),
+                ));
+            }
+            let key = self.read_identifier_or_keyword();
+            if key.is_empty() {
+                return Err(self.error_at(
+                    key_pos,
+                    key_line,
+                    key_line_start,
+                    format!("unexpected character '{}'", Self::token_display(b)),
+                ));
+            }
+
+            let is_path = key.eq_ignore_ascii_case("Path");
+            let is_args = key.eq_ignore_ascii_case("Args");
+            if !is_path && !is_args {
+                return Err(self.error_at(
+                    key_pos,
+                    key_line,
+                    key_line_start,
+                    format!("unexpected token '{key}', expected 'Path' or 'Args'"),
+                ));
+            }
+
+            self.skip_whitespace_and_comments();
+            if self.peek() != Some(b'=') {
+                return Err(self.make_error("expected '=' after key"));
+            }
+            self.advance(); // '='
+            self.skip_whitespace_and_comments();
+
+            if is_path {
+                let value = self.read_hashtable_string_value()?;
+                path = Some(PathBuf::from(value));
+            } else if is_args {
+                let value = self.read_args_value()?;
+                args = Some(value);
+            }
+        }
+    }
+
+    fn read_hashtable_string_value(&mut self) -> Result<String, ParseError> {
+        let Some(b) = self.peek() else {
+            return Err(self.make_error("expected string value"));
+        };
+        if b == b'\'' || b == b'"' {
+            let raw = self.read_string_literal()?;
+            Ok(decode_quoted_literal(raw))
+        } else {
+            let start = self.pos;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_whitespace()
+                    || c == b'}'
+                    || c == b'#'
+                    || c == b'<'
+                    || c == b';'
+                    || c == b','
+                {
+                    break;
+                }
+                self.advance();
+            }
+            if self.pos == start {
+                return Err(self.make_error("expected string value"));
+            }
+            Ok(self.src[start..self.pos].to_string())
+        }
+    }
+
+    fn read_args_value(&mut self) -> Result<Vec<String>, ParseError> {
+        let Some(b) = self.peek() else {
+            return Err(self.make_error("expected Args value"));
+        };
+        if b == b'@' || b == b'(' {
+            if b == b'@' {
+                self.advance();
+                if self.peek() != Some(b'(') {
+                    return Err(self.make_error("expected '(' after '@' in Args"));
+                }
+            }
+            self.advance(); // '('
+            let mut values = Vec::new();
+            loop {
+                self.skip_whitespace_and_comments();
+                let Some(c) = self.peek() else {
+                    return Err(self.make_error("unterminated Args array: missing ')'"));
+                };
+                if c == b')' {
+                    self.advance();
+                    return Ok(values);
+                }
+                if c == b'}' {
+                    return Err(self.make_error("unterminated Args array: missing ')'"));
+                }
+                if c == b',' {
+                    self.advance();
+                    continue;
+                }
+                values.push(self.read_array_element_string()?);
+            }
+        } else if b == b'\'' || b == b'"' {
+            Ok(vec![self.read_hashtable_string_value()?])
+        } else {
+            // Bare unquoted single arg (strictness relaxed only outside array; quoted preferred)
+            Ok(vec![self.read_hashtable_string_value()?])
+        }
+    }
+
+    fn read_array_element_string(&mut self) -> Result<String, ParseError> {
+        let Some(b) = self.peek() else {
+            return Err(self.make_error("expected string in Args array"));
+        };
+        if b == b'\'' || b == b'"' {
+            let raw = self.read_string_literal()?;
+            return Ok(decode_quoted_literal(raw));
+        }
+        // Strict: array elements must be quoted string literals
+        Err(self.error_at(
+            self.pos,
+            self.line,
+            self.line_start,
+            format!("unexpected character '{}'", Self::token_display(b)),
+        ))
+    }
+
+    fn make_error(&self, message: impl Into<String>) -> ParseError {
+        self.error_at(self.pos, self.line, self.line_start, message)
+    }
+
+    fn error_at(
+        &self,
+        pos: usize,
+        line: u32,
+        line_start: usize,
+        message: impl Into<String>,
+    ) -> ParseError {
         ParseError {
-            line: self.line,
-            col: (self.pos - self.line_start + 1) as u32,
-            message,
+            line,
+            col: (pos.saturating_sub(line_start) + 1) as u32,
+            message: message.into(),
+        }
+    }
+
+    fn token_display(b: u8) -> String {
+        match b {
+            b'\n' => "\\n".to_string(),
+            b'\r' => "\\r".to_string(),
+            b'\t' => "\\t".to_string(),
+            0x20..=0x7E => (b as char).to_string(),
+            _ => format!("0x{b:02X}"),
         }
     }
 }
@@ -303,6 +578,11 @@ function prompt {
         assert_eq!(ast.apps.len(), 0x01);
         assert_eq!(ast.apps[0].name, "'code'");
         assert_eq!(ast.apps[0].unquoted_name(), "code");
+        assert_eq!(
+            ast.apps[0].path,
+            PathBuf::from(r"C:\VSCode\Code.exe")
+        );
+        assert_eq!(ast.apps[0].args, vec!["--reuse-window"]);
         assert!(ast.apps[0].block_span.contains("C:\\VSCode\\Code.exe"));
 
         assert_eq!(ast.functions.len(), 0x01);
@@ -314,60 +594,118 @@ function prompt {
     fn test_braces_in_strings_and_comments() {
         let src = r#"
 Register-App "complex" @{
-    Script = "{ not a block }"
-    Note = 'also { not a block }'
-    # Comment with { brace }
-    <# Block comment { with braces } #>
-    Nested = {
-        Inner = 42
-    }
+    Path = "C:\app.exe"
+    Args = @('--flag={unclosed', 'note with } and # chars')
 }
 "#;
-        let ast = Scanner::new(src).parse().expect("should parse braces in strings");
+        let ast = Scanner::new(src)
+            .parse()
+            .expect("should parse braces in strings and comments");
         assert_eq!(ast.apps.len(), 0x01);
         assert_eq!(ast.apps[0].unquoted_name(), "complex");
-        assert!(ast.apps[0].block_span.contains("Inner = 42"));
+        assert_eq!(ast.apps[0].args.len(), 0x02);
+        assert!(ast.apps[0].block_span.ends_with('}'));
     }
 
     #[test]
     fn test_single_quote_escape() {
         let src = r#"
 Register-App 'app''name' @{
-    Val = 'it''s escaped'
+    Path = 'C:\it''s.exe'
+    Args = @()
 }
 "#;
         let ast = Scanner::new(src).parse().expect("single quote escaped");
         assert_eq!(ast.apps.len(), 0x01);
         assert_eq!(ast.apps[0].name, "'app''name'");
+        assert_eq!(ast.apps[0].path, PathBuf::from(r"C:\it's.exe"));
     }
 
     #[test]
     fn test_double_quote_backtick_escape() {
-        let src = "Register-App \"app`\"name\" @{ Key = \"val`\"quote\" }";
+        let src = "Register-App \"app`\"name\" @{ Path = \"val`\"quote.exe\" Args = @() }";
         let ast = Scanner::new(src).parse().expect("backtick escaped quote");
         assert_eq!(ast.apps.len(), 0x01);
         assert_eq!(ast.apps[0].name, "\"app`\"name\"");
+        assert_eq!(ast.apps[0].path, PathBuf::from("val\"quote.exe"));
     }
 
     #[test]
     fn test_missing_hashtable_error() {
         let src = "Register-App 'code' missing_at_brace";
         let err = Scanner::new(src).parse().expect_err("should fail");
-        assert_eq!(err.message, "Expected @{ after Register-App name");
+        assert_eq!(err.message, "expected '@{' after Register-App name");
     }
 
     #[test]
     fn test_unterminated_block_error() {
         let src = "Register-App 'code' @{ Path = 'test' ";
         let err = Scanner::new(src).parse().expect_err("should fail");
-        assert_eq!(err.message, "Unterminated block: missing '}'");
+        assert_eq!(err.message, "unterminated hashtable: missing '}'");
     }
 
     #[test]
     fn test_unknown_directive_error() {
         let src = "InvalidKeyword 'code' @{}";
         let err = Scanner::new(src).parse().expect_err("should fail");
-        assert_eq!(err.message, "Unknown top-level directive");
+        assert_eq!(err.message, "unexpected token 'InvalidKeyword'");
+        assert_eq!(err.line, 1);
+        assert_eq!(err.col, 1);
+    }
+
+    #[test]
+    fn test_illegal_top_level_character() {
+        let src = "Register-App 'a' @{ Path = 'a.exe' }\n!boom";
+        let err = Scanner::new(src).parse().expect_err("should fail");
+        assert_eq!(err.line, 2);
+        assert_eq!(err.col, 1);
+        assert!(err.message.contains("unexpected character"));
+        assert!(err.message.contains('!'));
+    }
+
+    #[test]
+    fn test_app_hashtable_rejects_unknown_keys() {
+        let src = "Register-App 'a' @{ Path = 'a.exe'\n    Target = 'foo' }";
+        let err = Scanner::new(src).parse().expect_err("should fail");
+        assert_eq!(err.line, 2);
+        assert_eq!(err.col, 5);
+        assert_eq!(
+            err.message,
+            "unexpected token 'Target', expected 'Path' or 'Args'"
+        );
+    }
+
+    #[test]
+    fn test_app_hashtable_malformed_args_unclosed_array() {
+        let src = "Register-App 'a' @{ Path = 'a.exe' Args = @('--x' }";
+        let err = Scanner::new(src).parse().expect_err("should fail");
+        assert_eq!(err.message, "unterminated Args array: missing ')'");
+    }
+
+    #[test]
+    fn test_app_hashtable_malformed_args_missing_quotes() {
+        let src = "Register-App 'a' @{ Path = 'a.exe' Args = @('ok', --bad) }";
+        let err = Scanner::new(src).parse().expect_err("should fail");
+        assert!(
+            err.message.contains("unexpected character"),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(err.message.contains('-') || err.message.contains("'-'") || err.message.contains('-'));
+    }
+
+    #[test]
+    fn test_error_diagnostic_format() {
+        let err = ParseError {
+            line: 4,
+            col: 5,
+            message: "unexpected token 'Exec', expected 'Path' or 'Args'".to_string(),
+        };
+        assert_eq!(
+            err.to_diagnostic(),
+            "~/.config/.shyena:4:5: error: unexpected token 'Exec', expected 'Path' or 'Args'"
+        );
+        assert!(err.to_diagnostic().chars().count() <= 120);
     }
 
     #[test]
@@ -391,7 +729,8 @@ function complex_fn {
 "#;
         let ast = Scanner::new(src).parse().expect("valid config must parse");
         assert_eq!(ast.apps.len(), 1);
-        assert_eq!(ast.apps[0].name, "'code'");
+        assert_eq!(ast.apps[0].unquoted_name(), "code");
+        assert_eq!(ast.apps[0].args.len(), 2);
         assert!(ast.apps[0].block_span.starts_with('{'));
         assert!(ast.apps[0].block_span.ends_with('}'));
 
@@ -407,16 +746,16 @@ function complex_fn {
         assert_eq!(ast.apps.len(), 1);
         assert_eq!(ast.functions.len(), 1);
 
-        // Unclosed brace on line 2
+        // Unclosed function brace on line 2
         let unclosed = "Register-App 'a' @{ Path = 'a.exe' }\nfunction broken {\n    $x = 1\n";
         let err = Scanner::new(unclosed).parse().unwrap_err();
-        assert_eq!(err.message, "Unterminated block: missing '}'");
+        assert_eq!(err.message, "unterminated block: missing '}'");
         assert_eq!(err.line, 4);
 
         // Missing @{ hashtable
         let bad_app = "Register-App 'a' { Path = 'a.exe' }";
         let err = Scanner::new(bad_app).parse().unwrap_err();
-        assert_eq!(err.message, "Expected @{ after Register-App name");
+        assert_eq!(err.message, "expected '@{' after Register-App name");
         assert_eq!(err.line, 1);
     }
 
@@ -431,6 +770,7 @@ function complex_fn {
         let ast = Scanner::new(slice).parse().unwrap();
 
         assert_eq!(ast.apps.len(), 1);
+        assert_eq!(ast.apps[0].path, PathBuf::from("wt.exe"));
         assert_eq!(ast.functions.len(), 1);
 
         let _ = fs::remove_file(&path);
@@ -438,18 +778,22 @@ function complex_fn {
 
     #[test]
     fn test_unterminated_string_literal() {
-        let single_err = Scanner::new("Register-App 'unterminated").parse().unwrap_err();
-        assert_eq!(single_err.message, "Unterminated string literal");
+        let single_err = Scanner::new("Register-App 'unterminated")
+            .parse()
+            .unwrap_err();
+        assert_eq!(single_err.message, "unterminated string literal");
 
-        let double_err = Scanner::new("Register-App 'a' @{ Path = \"unterminated }\n").parse().unwrap_err();
-        assert_eq!(double_err.message, "Unterminated string literal");
+        let double_err = Scanner::new("Register-App 'a' @{ Path = \"unterminated }\n")
+            .parse()
+            .unwrap_err();
+        assert_eq!(double_err.message, "unterminated string literal");
     }
 
     #[test]
     fn test_crlf_diagnostics_and_multiline() {
         let src = "Register-App 'test' @{\r\n    Path = 'a.exe'\r\n}\r\nfunction bad {\r\n";
         let err = Scanner::new(src).parse().unwrap_err();
-        assert_eq!(err.message, "Unterminated block: missing '}'");
+        assert_eq!(err.message, "unterminated block: missing '}'");
         assert_eq!(err.line, 5);
     }
 
@@ -474,22 +818,42 @@ function complex_fn {
 
     #[test]
     fn test_app_unquoted_name_edge_cases() {
-        let app_double = AppDef { name: "\"app\"", block_span: "{}" };
+        let app_double = AppDef {
+            name: "\"app\"",
+            block_span: "{}",
+            path: PathBuf::new(),
+            args: Vec::new(),
+        };
         assert_eq!(app_double.unquoted_name(), "app");
 
-        let app_single = AppDef { name: "'app'", block_span: "{}" };
+        let app_single = AppDef {
+            name: "'app'",
+            block_span: "{}",
+            path: PathBuf::new(),
+            args: Vec::new(),
+        };
         assert_eq!(app_single.unquoted_name(), "app");
 
-        let app_empty_quote = AppDef { name: "''", block_span: "{}" };
+        let app_empty_quote = AppDef {
+            name: "''",
+            block_span: "{}",
+            path: PathBuf::new(),
+            args: Vec::new(),
+        };
         assert_eq!(app_empty_quote.unquoted_name(), "");
 
-        let app_bare = AppDef { name: "bare_token", block_span: "{}" };
+        let app_bare = AppDef {
+            name: "bare_token",
+            block_span: "{}",
+            path: PathBuf::new(),
+            args: Vec::new(),
+        };
         assert_eq!(app_bare.unquoted_name(), "bare_token");
     }
 
     #[test]
     fn test_parse_set_theme() {
-        let dark = "Set-Theme 'dark'\nRegister-App 'a' @{}";
+        let dark = "Set-Theme 'dark'\nRegister-App 'a' @{ Path = 'a.exe' }";
         let ast = Scanner::new(dark).parse().expect("dark theme parses");
         assert_eq!(ast.theme, Some(Theme::Dark));
 
@@ -501,19 +865,21 @@ function complex_fn {
 
     #[test]
     fn test_missing_set_theme_is_none() {
-        let ast = Scanner::new("Register-App 'a' @{}").parse().unwrap();
+        let ast = Scanner::new("Register-App 'a' @{ Path = 'a.exe' }")
+            .parse()
+            .unwrap();
         assert_eq!(ast.theme, None);
     }
 
     #[test]
     fn test_invalid_set_theme_error() {
         let err = Scanner::new("Set-Theme 'mocha'").parse().unwrap_err();
-        assert_eq!(err.message, "Invalid theme: expected 'dark' or 'light'");
+        assert_eq!(err.message, "invalid theme: expected 'dark' or 'light'");
     }
 
     #[test]
     fn test_set_theme_requires_string_literal() {
         let err = Scanner::new("Set-Theme dark").parse().unwrap_err();
-        assert_eq!(err.message, "Expected string literal");
+        assert_eq!(err.message, "expected string literal");
     }
 }
