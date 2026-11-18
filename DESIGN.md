@@ -284,64 +284,59 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 - **PowerShell failures**: Non-zero exit status / `stderr` (including Windows PowerShell 5.1
   CLIXML records) is reduced to its first meaningful line, whitespace-collapsed, truncated to
   120 characters, and prefixed with the command name;
-- **Configuration errors**: `Config::load_with_diagnostics()` parse/IO failures open the launcher
-  directly in the fatal config error state; the §10 watcher routes `ReloadEvent::Error` into the
-  same overlay, and a later `ReloadEvent::Updated` clears it;
+- **Configuration errors**: `ConfigStore::load()` parse/IO failures are cached as a diagnostic and
+  shown the first time the launcher opens; `#config-reload` failures render the same overlay, and a
+  successful reload clears it;
 
 ---
 
-## 10. Configuration Hot-Reloading
+## 10. Configuration Loading & Manual Reloading
 
 *Status: Implemented*
 
 ### Architectural Design
 
-Shyena implements zero-dependency, low-latency configuration hot-reloading backed by native Win32
-`ReadDirectoryChangesW` directory monitoring and a dedicated trailing-edge debounce pipeline;
-it coordinates file system event listening, debounced parsing, and GPUI snapshot swaps.
+Shyena is a long-running, logon-started process, so the configuration is read exactly once during
+application initialization. The parsed `Config` is cached in memory (`ConfigStore`) and every
+launcher activation is served from that cache: opening the search window performs no filesystem I/O,
+spawns no watcher threads, and schedules no timers.
 
-### Directory Watching & Atomic Save Resilience
+### Initial Load & First-Run Seeding
 
-Modern code editors (VS Code, Neovim, Zed) save files via atomic swaps: writing to an ephemeral
-file before deleting/renaming the target; direct file handle watching fails across replacements.
+`ConfigStore::load()` runs in `main.rs` before the hotkey/event loop starts. If `~/.config/.shyena`
+is absent, the default configuration is written and cached; otherwise the file is read with the §6
+single-pass Win32 reader and parsed immediately. Parse/I/O failures are retained as a diagnostic
+while an empty fallback config keeps the UI renderable.
 
-Shyena watches the parent directory (`~/.config/`) using `CreateFileW` with `FILE_LIST_DIRECTORY`,
-`OPEN_EXISTING`, and `FILE_FLAG_BACKUP_SEMANTICS`; notifications are received in a 4-byte aligned
-4 KB buffer (`[u32; 1024]`), filtering `FILE_NOTIFY_INFORMATION` records for `.shyena`.
+### Manual Reload (`#config-reload`)
 
-### Trailing-Edge Debouncing Pipeline
+The reserved action string (`RESERVED_RELOAD_CMD = "config-reload"`) resolves before any config
+lookup, so the command remains reachable even when the cached config is empty. Invoking it
+synchronously re-reads and re-parses the file on the UI thread (~200 µs, §6), swaps the cached
+`Arc<Config>` and theme, and closes the launcher. A failure leaves the last known-good config active
+and renders the fatal config error panel in place.
 
-Rapid write bursts (e.g. truncation followed by write and atomic rename within ~10 ms) are
-coalesced using a 75 ms trailing-edge debouncer on a dedicated background thread:
+### Failure Recovery
 
-1. **Burst Absorption**: An initial `FsChanged` arm resets a 75 ms timeout window;
-2. **Quiescence Execution**: Once the 75 ms window expires with no further I/O activity, the
-   debouncer invokes `ConfigReader::read()` and `Scanner::parse()`;
-3. **Owned Snapshot Conversion**: Borrows from `ConfigReader` are transformed into an owned
-   `ConfigSnapshot` (`OwnedAppDef`, `OwnedFunctionDef`) dispatched across an `async-channel`;
-4. **Diagnostic Isolation**: In case of I/O or `ParseError`, a `ReloadEvent::Error` variant is
-   emitted to display UI diagnostics while keeping the previous valid snapshot active.
+Input is ignored while a fatal config error is displayed, so a failed load is retried when the
+launcher opens: `open_search_window` calls `ConfigStore::reload()` only when the cached diagnostic is
+set. Fixing the file and reopening therefore recovers without restarting Shyena, while the healthy
+path stays I/O-free.
 
-### Reserved `#config-reload` Command
+### Trade-offs
 
-A thread-safe `ReloadTrigger` handle and reserved action string (`RESERVED_RELOAD_CMD = "config-reload"`)
-allow instant manual reloads without awaiting timer expiration. The watcher is started once in
-`main.rs`; `#config-reload` (or bare `config-reload`) calls `ReloadTrigger::trigger_now()` and closes
-the launcher, letting the resulting `ReloadEvent` either show the fatal config error or keep the
-launcher closed. Typing an unregistered command and pressing Enter now produces an in-app error
-instead of a silent stdout message.
+- External edits are not observed automatically; apply them via `#config-reload` (or by repairing an
+  invalid file and reopening the launcher).
+- Manual reload is naturally compatible with atomic editor saves, since the file is reopened by path
+  rather than watched through a handle.
 
 ### Implementation Details
-- **Module Location**: `src/config/watcher.rs`, exposed via `src/config/mod.rs`; started and consumed
-  in `src/main.rs`;
+- **Module Location**: `src/config/store.rs`, re-exported via `src/config/mod.rs`;
 - **Core Types**:
-  - `ConfigSnapshot`: owned snapshot containing `apps: Vec<OwnedAppDef>` and `functions: Vec<OwnedFunctionDef>`;
-  - `ReloadError`: encapsulates I/O errors and zero-copy `ParseError` diagnostics;
-  - `ReloadEvent`: enum of `Updated(ConfigSnapshot)` and `Error(ReloadError)`;
-  - `ReloadTrigger`: `mpsc::Sender<WatchSignal>` wrapper for instantaneous manual triggers;
-  - `spawn_config_watcher()`: spawns watcher and debouncer threads, returning trigger and event receiver;
-- **UI Integration**: a GPUI task consumes `ReloadEvent`; `Updated` swaps the active bar's config/theme
-  and clears a config error, `Error` opens or reuses the launcher in the fatal config error state.
+  - `ConfigStore`: cached `Arc<Config>`, reusable `ConfigReader`, and the last-load diagnostic;
+  - `ReloadOutcome`: `Updated(Arc<Config>)` or `Error(String)`;
+- **UI Integration**: `SearchBar` holds an `Rc<RefCell<ConfigStore>>`; `#config-reload` calls
+  `reload()` and either applies the new config or shows the fatal error panel.
 
 ---
 
