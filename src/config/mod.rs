@@ -12,6 +12,7 @@ pub use watcher::{
     ReloadEvent, ReloadTrigger, RESERVED_RELOAD_CMD,
 };
 
+use crate::theme::Theme;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub apps: FxHashMap<String, AppAction>,
     pub ps: FxHashMap<String, PsAction>,
+    pub theme: Theme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +64,11 @@ impl Config {
             ps.insert(name, PsAction { script, body: func.block_span.to_string() });
         }
 
-        Config { apps, ps }
+        Config {
+            apps,
+            ps,
+            theme: ast.theme.unwrap_or_default(),
+        }
     }
 
     pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -89,6 +95,9 @@ impl Config {
 
     /// Configuration seeded on first launch; also the canonical multi-arg example.
     const DEFAULT_SHYENA: &str = r#"# Shyena Configuration (~/.config/.shyena)
+
+# Theme: 'dark' = Catppuccin Macchiato, 'light' = Catppuccin Latte
+Set-Theme 'dark'
 
 Register-App 'helium' @{
     Path = 'C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe'
@@ -140,7 +149,11 @@ impl From<ConfigSnapshot> for Config {
             ps.insert(func.name, PsAction { script, body: func.block_span });
         }
 
-        Config { apps, ps }
+        Config {
+            apps,
+            ps,
+            theme: snapshot.theme,
+        }
     }
 }
 
@@ -367,6 +380,7 @@ function brightness {
 
         assert_eq!(cfg.apps.len(), 0x02);
         assert!(!cfg.apps.contains_key("code"));
+        assert_eq!(cfg.theme, Theme::Dark);
 
         let helium = cfg.apps.get("helium").expect("helium exists");
         assert_eq!(helium.args, Vec::<String>::new());
@@ -377,6 +391,19 @@ function brightness {
             PathBuf::from("C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe")
         );
         assert_eq!(chat.args, vec!["--start-fullscreen", "https://chatgpt.com"]);
+    }
+
+    #[test]
+    fn test_theme_from_ast() {
+        let light = "Set-Theme 'light'\nRegister-App 'wt' @{ Path = 'wt.exe' }";
+        let ast = Scanner::new(light).parse().unwrap();
+        let cfg = Config::from_ast(&ast);
+        assert_eq!(cfg.theme, Theme::Light);
+        assert_eq!(cfg.theme.as_config_str(), "light");
+
+        let missing = "Register-App 'wt' @{ Path = 'wt.exe' }";
+        let ast = Scanner::new(missing).parse().unwrap();
+        assert_eq!(Config::from_ast(&ast).theme, Theme::Dark);
     }
 
     #[test]

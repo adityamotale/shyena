@@ -1,5 +1,19 @@
 use std::fmt;
 
+use crate::theme::Theme;
+
+#[inline]
+fn unquote_literal<'a>(lit: &'a str) -> &'a str {
+    if (lit.starts_with('\'') && lit.ends_with('\''))
+        || (lit.starts_with('"') && lit.ends_with('"'))
+    {
+        if lit.len() >= 0x02 {
+            return &lit[1..lit.len() - 1];
+        }
+    }
+    lit
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ParseError {
     pub line: u32,
@@ -24,14 +38,7 @@ pub struct AppDef<'a> {
 impl<'a> AppDef<'a> {
     #[inline]
     pub fn unquoted_name(&self) -> &'a str {
-        if (self.name.starts_with('\'') && self.name.ends_with('\''))
-            || (self.name.starts_with('"') && self.name.ends_with('"'))
-        {
-            if self.name.len() >= 0x02 {
-                return &self.name[1..self.name.len() - 1];
-            }
-        }
-        self.name
+        unquote_literal(self.name)
     }
 }
 
@@ -45,6 +52,7 @@ pub struct FunctionDef<'a> {
 pub struct ConfigAst<'a> {
     pub apps: Vec<AppDef<'a>>,
     pub functions: Vec<FunctionDef<'a>>,
+    pub theme: Option<Theme>,
 }
 
 /// Zero-copy byte scanner for `.shyena` configuration files.
@@ -213,6 +221,7 @@ impl<'a> Scanner<'a> {
         let mut ast = ConfigAst {
             apps: Vec::new(),
             functions: Vec::new(),
+            theme: None,
         };
 
         loop {
@@ -223,7 +232,15 @@ impl<'a> Scanner<'a> {
 
             let kw = self.read_identifier_or_keyword();
 
-            if kw.eq_ignore_ascii_case("Register-App") {
+            if kw.eq_ignore_ascii_case("Set-Theme") {
+                self.skip_whitespace_and_comments();
+                let raw = self.read_string_literal()?;
+                let value = unquote_literal(raw);
+                let Some(theme) = Theme::from_config_str(value) else {
+                    return Err(self.make_error("Invalid theme: expected 'dark' or 'light'"));
+                };
+                ast.theme = Some(theme);
+            } else if kw.eq_ignore_ascii_case("Register-App") {
                 self.skip_whitespace_and_comments();
                 let name = self.read_string_literal()?;
 
@@ -468,5 +485,35 @@ function complex_fn {
 
         let app_bare = AppDef { name: "bare_token", block_span: "{}" };
         assert_eq!(app_bare.unquoted_name(), "bare_token");
+    }
+
+    #[test]
+    fn test_parse_set_theme() {
+        let dark = "Set-Theme 'dark'\nRegister-App 'a' @{}";
+        let ast = Scanner::new(dark).parse().expect("dark theme parses");
+        assert_eq!(ast.theme, Some(Theme::Dark));
+
+        let light = "set-theme \"LIGHT\"\nfunction f { }";
+        let ast = Scanner::new(light).parse().expect("light theme parses");
+        assert_eq!(ast.theme, Some(Theme::Light));
+        assert_eq!(ast.functions.len(), 0x01);
+    }
+
+    #[test]
+    fn test_missing_set_theme_is_none() {
+        let ast = Scanner::new("Register-App 'a' @{}").parse().unwrap();
+        assert_eq!(ast.theme, None);
+    }
+
+    #[test]
+    fn test_invalid_set_theme_error() {
+        let err = Scanner::new("Set-Theme 'mocha'").parse().unwrap_err();
+        assert_eq!(err.message, "Invalid theme: expected 'dark' or 'light'");
+    }
+
+    #[test]
+    fn test_set_theme_requires_string_literal() {
+        let err = Scanner::new("Set-Theme dark").parse().unwrap_err();
+        assert_eq!(err.message, "Expected string literal");
     }
 }

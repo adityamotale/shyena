@@ -41,8 +41,9 @@ It replaces shell alias scripts, hotkey daemons, and traditional Windows search 
 - **Candidate Row Height**: `32.0 px` per matched candidate item;
 - **Candidate Ceiling**: `MAX_VISIBLE_ITEMS: 0x06`; window dynamically resizes up to `254.0 px`;
 - **Border Radius**: `0.0 px` sharp corners throughout container and list items;
-- **Color Palette**: Catppuccin Mocha semantic token palette (dark matte default) with Latte support;
-  green accents for `@app` and search glyphs;
+- **Color Palette**: Catppuccin Macchiato semantic token palette (dark matte default) with Latte
+  support for light mode; `@app` and search accents use Macchiato green in dark mode and Latte blue
+  in light mode; candidate rows use palette-derived accent tints;
 
 ---
 
@@ -96,7 +97,13 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
 - Primary path: `~/.config/.shyena`;
 
 ### Language Construct Rules
-1. **Application Registration (`Register-App`)**:
+1. **Theme Selection (`Set-Theme`)**:
+   Top-level quoted value selecting the palette: `'dark'` maps to Catppuccin Macchiato,
+   `'light'` maps to Catppuccin Latte; values are case-insensitive and omission defaults to `'dark'`:
+   ```powershell
+   Set-Theme 'dark'
+   ```
+2. **Application Registration (`Register-App`)**:
    Static definitions for binaries and fixed arguments with zero dynamic parameter logic:
    ```powershell
    Register-App 'code' @{
@@ -104,7 +111,7 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
        Args = @('--reuse-window')
    }
    ```
-2. **PowerShell Automation Functions (`function <name>`)**:
+3. **PowerShell Automation Functions (`function <name>`)**:
    Commands requiring dynamic parameters, system control, or multi-step logic are written as standard PowerShell functions:
    ```powershell
    function brightness {

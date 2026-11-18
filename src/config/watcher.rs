@@ -1,5 +1,6 @@
 use crate::config::io::ConfigReader;
 use crate::config::parser::{ParseError, Scanner};
+use crate::theme::Theme;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
@@ -34,6 +35,7 @@ pub struct OwnedFunctionDef {
 pub struct ConfigSnapshot {
     pub apps: Vec<OwnedAppDef>,
     pub functions: Vec<OwnedFunctionDef>,
+    pub theme: Theme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +110,11 @@ fn execute_reload(reader: &mut ConfigReader) -> ReloadEvent {
                 })
                 .collect();
 
-            ReloadEvent::Updated(ConfigSnapshot { apps, functions })
+            ReloadEvent::Updated(ConfigSnapshot {
+                apps,
+                functions,
+                theme: ast.theme.unwrap_or_default(),
+            })
         }
         Err(err) => ReloadEvent::Error(ReloadError::Parse(err)),
     }
@@ -267,7 +273,7 @@ mod tests {
         std::fs::create_dir_all(&test_dir).unwrap();
         let config_path = test_dir.join(".shyena");
 
-        let sample_config = "# shyena:v1\nRegister-App \"editor\" @{\n    path = \"code.exe\"\n}\n\nfunction prompt {\n    Write-Host \"hello\"\n}\n";
+        let sample_config = "# shyena:v1\nSet-Theme 'light'\nRegister-App \"editor\" @{\n    path = \"code.exe\"\n}\n\nfunction prompt {\n    Write-Host \"hello\"\n}\n";
         std::fs::write(&config_path, sample_config).unwrap();
 
         let (trigger, event_rx) = spawn_config_watcher(config_path).unwrap();
@@ -280,6 +286,7 @@ mod tests {
                 assert_eq!(snapshot.apps[0].name, "editor");
                 assert_eq!(snapshot.functions.len(), 1);
                 assert_eq!(snapshot.functions[0].name, "prompt");
+                assert_eq!(snapshot.theme, Theme::Light);
             }
             ReloadEvent::Error(err) => panic!("expected successful reload, got: {:?}", err),
         }

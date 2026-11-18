@@ -9,7 +9,7 @@ use gpui::*;
 mod config;
 mod exec;
 mod theme;
-use theme::Mocha as Theme;
+use theme::Theme;
 
 const WIN_WIDTH: f32 = 660.0;
 const BAR_HEIGHT: f32 = 62.0;
@@ -158,6 +158,7 @@ struct SearchBar {
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     config: Arc<config::Config>,
     ps_sender: Sender<PsTask>,
+    theme: Theme,
     selected_index: usize,
     filtered_actions: Vec<CandidateAction>,
 }
@@ -169,6 +170,7 @@ impl SearchBar {
         active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
         config: Arc<config::Config>,
         ps_sender: Sender<PsTask>,
+        theme: Theme,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
@@ -195,6 +197,7 @@ impl SearchBar {
             active_window,
             config,
             ps_sender,
+            theme,
             selected_index: 0,
             filtered_actions: Vec::new(),
         };
@@ -379,24 +382,25 @@ impl SearchBar {
 
 impl Render for SearchBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
         let trimmed = self.query.trim();
         let first_token = trimmed.split_whitespace().next().unwrap_or("");
 
         let mode_tag = if trimmed.is_empty() {
             None
         } else if trimmed.starts_with('@') {
-            Some(("LAUNCH", Theme::green()))
+            Some(("LAUNCH", theme.accent()))
         } else if trimmed.starts_with('#') {
-            Some(("EXEC", Theme::peach()))
+            Some(("EXEC", theme.peach()))
         } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
             match selected.kind {
-                ActionKind::App => Some(("LAUNCH", Theme::green())),
-                ActionKind::Ps => Some(("EXEC", Theme::peach())),
+                ActionKind::App => Some(("LAUNCH", theme.accent())),
+                ActionKind::Ps => Some(("EXEC", theme.peach())),
             }
         } else if self.config.apps.contains_key(first_token) {
-            Some(("LAUNCH", Theme::green()))
+            Some(("LAUNCH", theme.accent()))
         } else {
-            Some(("EXEC", Theme::peach()))
+            Some(("EXEC", theme.peach()))
         };
 
         div()
@@ -469,19 +473,19 @@ impl Render for SearchBar {
             .flex()
             .flex_col()
             .font_family("GeistMono Nerd Font Mono")
-            .bg(Theme::terminal_bg())
+            .bg(theme.terminal_bg())
             .rounded(px(0.0))
             .border_1()
-            .border_color(Theme::terminal_frame())
+            .border_color(theme.terminal_frame())
             .overflow_hidden()
             // Top ASCII TUI header bracket
             .child(
                 div()
                     .h(px(20.0))
                     .px(px(10.0))
-                    .bg(Theme::terminal_header())
+                    .bg(theme.terminal_header())
                     .border_b_1()
-                    .border_color(Theme::border_subtle())
+                    .border_color(theme.border_subtle())
                     .flex()
                     .items_center()
                     .justify_between()
@@ -493,17 +497,17 @@ impl Render for SearchBar {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_color(Theme::terminal_bracket())
+                                    .text_color(theme.terminal_bracket())
                                     .child("┌─["),
                             )
                             .child(
                                 div()
-                                    .text_color(Theme::green())
+                                    .text_color(theme.accent())
                                     .child("shyena::cli"),
                             )
                             .child(
                                 div()
-                                    .text_color(Theme::terminal_bracket())
+                                    .text_color(theme.terminal_bracket())
                                     .child("]"),
                             ),
                     )
@@ -514,12 +518,12 @@ impl Render for SearchBar {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_color(Theme::subtext0())
+                                    .text_color(theme.subtext0())
                                     .child("[ ESC: exit ]"),
                             )
                             .child(
                                 div()
-                                    .text_color(Theme::terminal_bracket())
+                                    .text_color(theme.terminal_bracket())
                                     .child("─┐"),
                             ),
                     ),
@@ -536,7 +540,7 @@ impl Render for SearchBar {
                             .mr(px(10.0))
                             .flex()
                             .items_center()
-                            .text_color(Theme::green())
+                            .text_color(theme.accent())
                             .text_size(px(14.0))
                             .child("❯"),
                     )
@@ -552,13 +556,13 @@ impl Render for SearchBar {
                                     .items_center()
                                     .child(
                                         div()
-                                            .text_color(Theme::overlay0())
+                                            .text_color(theme.overlay0())
                                             .child("@ for apps, # for commands..."),
                                     )
                                     .child(
                                         div()
                                             .ml(px(2.0))
-                                            .text_color(Theme::green())
+                                            .text_color(theme.accent())
                                             .child("█"),
                                     )
                             } else {
@@ -567,13 +571,13 @@ impl Render for SearchBar {
                                     .items_center()
                                     .child(
                                         div()
-                                            .text_color(Theme::text())
+                                            .text_color(theme.text())
                                             .child(self.query.clone()),
                                     )
                                     .child(
                                         div()
                                             .ml(px(2.0))
-                                            .text_color(Theme::green())
+                                            .text_color(theme.accent())
                                             .child("█"),
                                     )
                             }),
@@ -584,9 +588,9 @@ impl Render for SearchBar {
                             .px(px(6.0))
                             .py(px(1.5))
                             .rounded(px(0.0))
-                            .bg(Theme::surface0())
+                            .bg(theme.surface0())
                             .border_1()
-                            .border_color(Theme::surface1())
+                            .border_color(theme.surface1())
                             .text_color(color)
                             .text_size(px(10.5))
                             .child(format!("[ {} ]", label))
@@ -600,14 +604,14 @@ impl Render for SearchBar {
                     div()
                         .w_full()
                         .border_t_1()
-                        .border_color(Theme::border_subtle())
+                        .border_color(theme.border_subtle())
                         .flex()
                         .flex_col()
                         .children(visible_items.map(|(idx, item)| {
                             let is_selected = idx == selected_idx;
                             let (badge_text, badge_color) = match item.kind {
-                                ActionKind::App => ("APP", Theme::green()),
-                                ActionKind::Ps => ("PS", Theme::peach()),
+                                ActionKind::App => ("APP", theme.accent()),
+                                ActionKind::Ps => ("PS", theme.peach()),
                             };
                             let action_item = item.clone();
 
@@ -619,11 +623,11 @@ impl Render for SearchBar {
                                 .justify_between()
                                 .text_size(px(12.0))
                                 .bg(if is_selected {
-                                    Theme::surface0()
+                                    theme.surface0()
                                 } else {
-                                    Theme::terminal_bg()
+                                    theme.terminal_bg()
                                 })
-                                .hover(|style| style.bg(Theme::surface0()))
+                                .hover(|style| style.bg(theme.surface0()))
                                 .cursor_pointer()
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -640,9 +644,9 @@ impl Render for SearchBar {
                                             div()
                                                 .px(px(4.0))
                                                 .py(px(1.0))
-                                                .bg(Theme::surface1())
+                                                .bg(theme.surface1())
                                                 .border_1()
-                                                .border_color(Theme::border_subtle())
+                                                .border_color(theme.border_subtle())
                                                 .text_color(badge_color)
                                                 .text_size(px(9.5))
                                                 .child(badge_text),
@@ -650,16 +654,16 @@ impl Render for SearchBar {
                                         .child(
                                             div()
                                                 .text_color(if is_selected {
-                                                    Theme::green()
+                                                    theme.accent()
                                                 } else {
-                                                    Theme::text()
+                                                    theme.text()
                                                 })
                                                 .child(item.key.clone()),
                                         ),
                                 )
                                 .child(
                                     div()
-                                        .text_color(Theme::subtext0())
+                                        .text_color(theme.detail_text())
                                         .text_size(px(11.0))
                                         .child(item.detail.clone()),
                                 )
@@ -714,8 +718,9 @@ fn open_search_window(
     cx.activate(true);
     let active_ref = active_window.clone();
     let config = Arc::new(config::Config::load());
+    let theme = config.theme;
     cx.open_window(options, |window, cx| {
-        cx.new(|cx| SearchBar::new(window, cx, active_ref, config, ps_sender))
+        cx.new(|cx| SearchBar::new(window, cx, active_ref, config, ps_sender, theme))
     })
     .unwrap()
 }
