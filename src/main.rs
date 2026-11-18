@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::{cell::RefCell, rc::Rc, sync::Arc, thread, time::Duration};
 use async_channel::{Receiver, Sender};
 use global_hotkey::{
