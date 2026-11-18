@@ -204,6 +204,18 @@ impl SearchBar {
 
     fn update_filtered_actions(&mut self, window: &mut Window) {
         let trimmed = self.query.trim();
+        if trimmed.is_empty() {
+            self.filtered_actions.clear();
+            self.selected_index = 0;
+            let target_height = px(BAR_HEIGHT);
+            let current_size = window.bounds().size;
+            let diff: f32 = (current_size.height - target_height).into();
+            if diff.abs() > 0.5 {
+                window.resize(size(current_size.width, target_height));
+            }
+            return;
+        }
+
         let mut tokens_iter = trimmed.split_whitespace();
         let raw_token = tokens_iter.next().unwrap_or("");
 
@@ -370,18 +382,21 @@ impl Render for SearchBar {
         let trimmed = self.query.trim();
         let first_token = trimmed.split_whitespace().next().unwrap_or("");
 
-        let (mode_label, mode_color) = if self.query.is_empty() {
-            ("READY", Theme::subtext0())
-        } else if self.query.starts_with('@') {
-            ("@ APPS", Theme::green())
-        } else if self.query.starts_with('#') {
-            ("# PS", Theme::peach())
+        let mode_tag = if trimmed.is_empty() {
+            None
+        } else if trimmed.starts_with('@') {
+            Some(("LAUNCH", Theme::green()))
+        } else if trimmed.starts_with('#') {
+            Some(("EXEC", Theme::peach()))
+        } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
+            match selected.kind {
+                ActionKind::App => Some(("LAUNCH", Theme::green())),
+                ActionKind::Ps => Some(("EXEC", Theme::peach())),
+            }
         } else if self.config.apps.contains_key(first_token) {
-            ("↵ APP", Theme::green())
-        } else if self.config.ps.contains_key(first_token) {
-            ("↵ PS", Theme::peach())
+            Some(("LAUNCH", Theme::green()))
         } else {
-            ("↵ EXEC", Theme::green())
+            Some(("EXEC", Theme::peach()))
         };
 
         div()
@@ -538,7 +553,7 @@ impl Render for SearchBar {
                                     .child(
                                         div()
                                             .text_color(Theme::overlay0())
-                                            .child("type command, @apps, or #ps..."),
+                                            .child("@ for apps, # for commands..."),
                                     )
                                     .child(
                                         div()
@@ -564,7 +579,7 @@ impl Render for SearchBar {
                             }),
                     )
                     // Sharp bracketed action tag
-                    .child(
+                    .children(mode_tag.map(|(label, color)| {
                         div()
                             .px(px(6.0))
                             .py(px(1.5))
@@ -572,10 +587,10 @@ impl Render for SearchBar {
                             .bg(Theme::surface0())
                             .border_1()
                             .border_color(Theme::surface1())
-                            .text_color(mode_color)
+                            .text_color(color)
                             .text_size(px(10.5))
-                            .child(format!("[ {} ]", mode_label)),
-                    ),
+                            .child(format!("[ {} ]", label))
+                    })),
             )
             .children(if !self.filtered_actions.is_empty() {
                 let selected_idx = self.selected_index;
