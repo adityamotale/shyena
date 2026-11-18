@@ -21,18 +21,12 @@ It replaces shell alias scripts, hotkey daemons, and traditional Windows search 
 - Monospace font family: **GeistMono Nerd Font Mono** (400 weight only)
 - Asset layout under `assets/fonts/`:
   - `GeistMonoNerdFontMono-Regular.otf` — Regular base weight (400)
-  - `LICENSE-GeistMono.txt` — SIL Open Font License 1.1 (OFL)
 
 ### In-Memory Font Loading
 - Embedded into the binary via `include_bytes!` to eliminate system font installation requirements;
 - Loaded at GPUI startup using `cx.text_system().add_fonts(...)`;
 - Cascades from root container via `.font_family("GeistMono Nerd Font Mono")`;
 - Strict 1-cell monospace icon width guarantees alignment across ASCII/TUI framing (`┌─[`, `─┐`), prompts (`❯`), and custom cursor blocks (`█`);
-
-### OFL 1.1 Compliance & Distribution
-- SIL Open Font License requires preserving copyright and license notices upon redistribution;
-- Source tree retains `assets/fonts/LICENSE-GeistMono.txt`;
-- Binary distributions must bundle license text within the distribution archive;
 
 ### Layout Geometry & Aesthetics
 - **Width**: `660.0 px` fixed width, centered horizontally;
