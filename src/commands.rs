@@ -1,6 +1,6 @@
 //! Built-in commands addressed through the `:` query scope.
 //!
-//! These run in-process and never spawn an app or a PowerShell worker. Adding a
+//! These run in-process and never spawn an app or a PowerShell process. Adding a
 //! command is intentionally mechanical: add an [`InternalCommand`] variant, a
 //! [`CommandSpec`] row, and a match arm where the command is executed.
 

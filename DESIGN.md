@@ -85,12 +85,12 @@ Queries follow a clean tokenizer contract:
   - Spawned directly via `std::process::Command` / Win32 `CreateProcessW`;
   - Sub-5ms invocation latency; static flags applied without dynamic token expansion;
 - **PowerShell Async Pipeline (`#ps`)**:
-  - Dispatched to worker threads via an `async-channel` queue;
-  - Non-blocking execution preserves 60+ FPS UI interaction;
+  - Each invocation runs on a short-lived `shyena-ps-task` thread;
+  - The UI thread never blocks on process creation or script execution;
   - Forwards CLI parameters directly to script functions;
 - **Built-in Command Path (`:cmd`)**:
   - Dispatched in-process by the `src/commands.rs` registry;
-  - Never spawns a process or PowerShell worker; current command is `:reload`;
+  - Never spawns a process or PowerShell task; current command is `:reload`;
 
 ---
 
@@ -207,7 +207,7 @@ instead, it performs **Top-Level Boundary Extraction**:
 2. **Block Lexing**: Identifies `Register-App` and `function` keywords;
 3. **Zero-Copy Slicing**: Uses a string-, comment-, and escape-aware brace counter to find the
    exact closing `}` of a block; it slices the original `&'a str` and passes the unmodified script
-   block to the PowerShell automation worker.
+   block to the PowerShell execution task.
 
 ### PowerShell Lexical Compliance Rules
 
@@ -250,12 +250,13 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 - **DWM Frame & Geometry**: `DwmExtendFrameIntoClientArea` with 1px margin triggers Windows
   hardware drop shadow; `DWMWCP_DONOTROUND` enforces 0px sharp corners; `HWND_TOPMOST` maintains
   foreground window focus;
-- **Diagnostic-Aware Execution**: Worker thread processes `PsTask` queue by constructing a
-  self-contained execution block (`& { function ... }`); strictly encodes the payload to
-  UTF-16LE Base64 and executes via Windows PowerShell 5.1 (`pwsh` as fallback) using
-  `-ExecutionPolicy Bypass` and `CREATE_NO_WINDOW` (`0x0800_0000`);
+- **Diagnostic-Aware Execution**: Each invocation spawns a short-lived `shyena-ps-task` thread
+  that constructs a self-contained execution block (`& { function ... }`), strictly encodes the
+  payload to UTF-16LE Base64 and executes via Windows PowerShell 5.1 (`pwsh` as fallback) using
+  `-ExecutionPolicy Bypass` and `CREATE_NO_WINDOW` (`0x0800_0000`); no PowerShell thread exists
+  while the launcher is idle;
 - **Error Surfacing**: `dispatch_ps_function` captures `stderr` through redirected temp files
-  (avoiding GUI-child pipe hangs) and returns it on non-zero exit; the worker sends a condensed
+  (avoiding GUI-child pipe hangs) and returns it on non-zero exit; the task thread sends a condensed
   `PsError` over an `async-channel` to the GPUI diagnostic overlay instead of writing a log file;
 - **Missing-Argument Guard**: Functions indexing `$args[...]` are rejected before spawning
   PowerShell when no dynamic tokens were supplied, preventing `[int]$null` -> `0` coercion;
@@ -284,7 +285,7 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
   can never reappear while the configuration is invalid;
 - **Dismissal**: `[Esc]` on a runtime error clears it and returns to an empty `Idle` bar in the same
   window, ready for a retry;
-- **Late Errors**: If the launcher was already dismissed when the worker reports the failure, a
+- **Late Errors**: If the launcher was already dismissed when the task thread reports the failure, a
   new window is opened directly in the `Error` state;
 
 ### Reported Failures

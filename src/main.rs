@@ -154,13 +154,6 @@ mod platform {
 }
 
 #[derive(Clone, Debug)]
-pub struct PsTask {
-    pub function_name: String,
-    pub function_body: String,
-    pub dynamic_tokens: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
 pub struct PsError {
     pub message: String,
 }
@@ -286,25 +279,24 @@ fn resolve_command(
     Err(format!("unknown command '{key}'"))
 }
 
-fn spawn_powershell_worker(rx: Receiver<PsTask>, error_tx: Sender<PsError>) {
-    thread::spawn(move || {
-        while let Ok(task) = rx.recv_blocking() {
-            execute_powershell_task(task, &error_tx);
-        }
-    });
-}
-
-fn execute_powershell_task(task: PsTask, error_tx: &Sender<PsError>) {
-    let args: Vec<&str> = task.dynamic_tokens.iter().map(|s| s.as_str()).collect();
-    if let Err(err) = exec::dispatch_ps_function(&task.function_name, &task.function_body, &args) {
+/// Runs one PowerShell function and reports failures through the shared error
+/// channel. Blocking: callers must run this off the UI thread.
+fn run_ps_task(
+    function_name: &str,
+    function_body: &str,
+    dynamic_tokens: &[String],
+    error_tx: &Sender<PsError>,
+) {
+    let args: Vec<&str> = dynamic_tokens.iter().map(String::as_str).collect();
+    if let Err(err) = exec::dispatch_ps_function(function_name, function_body, &args) {
         let _ = error_tx.send_blocking(PsError {
-            message: exec::format_ps_error(&task.function_name, &err),
+            message: exec::format_ps_error(function_name, &err),
         });
     }
 }
 
-/// Hidden window that keeps GPUI's run loop (and the PowerShell worker) alive
-/// after the launcher window is dismissed.
+/// Hidden window that keeps GPUI's run loop (and the hotkey/error channels)
+/// alive after the launcher window is dismissed.
 struct AnchorWindow;
 
 impl Render for AnchorWindow {
@@ -320,7 +312,7 @@ struct SearchBar {
     _subscription: Subscription,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     config: Arc<config::Config>,
-    ps_sender: Sender<PsTask>,
+    ps_error_tx: Sender<PsError>,
     store: Rc<RefCell<ConfigStore>>,
     theme: Theme,
     selected_index: usize,
@@ -333,7 +325,7 @@ impl SearchBar {
         window: &mut Window,
         cx: &mut Context<Self>,
         active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
-        ps_sender: Sender<PsTask>,
+        ps_error_tx: Sender<PsError>,
         store: Rc<RefCell<ConfigStore>>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -363,7 +355,7 @@ impl SearchBar {
             _subscription: subscription,
             active_window,
             config,
-            ps_sender,
+            ps_error_tx,
             store,
             theme,
             selected_index: 0,
@@ -620,12 +612,18 @@ impl SearchBar {
             }
             ActionKind::Ps => {
                 if let Some(ps) = self.config.ps.get(&action.key) {
-                    let task = PsTask {
-                        function_name: action.key.clone(),
-                        function_body: ps.body.clone(),
-                        dynamic_tokens: dynamic_args.to_vec(),
-                    };
-                    let _ = self.ps_sender.send_blocking(task);
+                    let name = action.key.clone();
+                    let body = ps.body.clone();
+                    let args = dynamic_args.to_vec();
+                    let error_tx = self.ps_error_tx.clone();
+                    if let Err(err) = thread::Builder::new()
+                        .name("shyena-ps-task".into())
+                        .spawn(move || run_ps_task(&name, &body, &args, &error_tx))
+                    {
+                        let _ = self.ps_error_tx.send_blocking(PsError {
+                            message: format!("{}: failed to start task: {err}", action.key),
+                        });
+                    }
                 }
             }
             // Internal commands are dispatched through `activate`, which needs
@@ -1054,7 +1052,7 @@ impl Render for SearchBar {
 fn open_search_window(
     cx: &mut App,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
-    ps_sender: Sender<PsTask>,
+    ps_error_tx: Sender<PsError>,
     store: Rc<RefCell<ConfigStore>>,
 ) -> WindowHandle<SearchBar> {
     // Healthy opens are pure memory. Retry the load only when the cached one
@@ -1102,7 +1100,7 @@ fn open_search_window(
     let store_ref = store.clone();
     let handle = cx
         .open_window(options, move |window, cx| {
-            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_sender, store_ref))
+            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_error_tx, store_ref))
         })
         .unwrap();
 
@@ -1119,7 +1117,7 @@ fn open_search_window(
 fn toggle_search_window(
     cx: &mut App,
     active_window: &Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
-    ps_sender: &Sender<PsTask>,
+    ps_error_tx: &Sender<PsError>,
     store: Rc<RefCell<ConfigStore>>,
 ) {
     let mut win_ref = active_window.borrow_mut();
@@ -1137,8 +1135,7 @@ fn toggle_search_window(
 
     if !was_open {
         drop(win_ref);
-        let handle =
-            open_search_window(cx, active_window.clone(), ps_sender.clone(), store);
+        let handle = open_search_window(cx, active_window.clone(), ps_error_tx.clone(), store);
         *active_window.borrow_mut() = Some(handle);
     }
 }
@@ -1181,7 +1178,7 @@ fn main() {
         )));
 
         // GPUI quits when its last window closes. Keep an invisible 1x1 window
-        // open so the background PowerShell worker survives launcher dismissal.
+        // open so the hotkey listener and async error delivery survive dismissal.
         let _anchor = cx
             .open_window(
                 WindowOptions {
@@ -1200,10 +1197,8 @@ fn main() {
             .expect("Failed to create anchor window");
 
         let (tx, rx): (Sender<()>, Receiver<()>) = async_channel::unbounded();
-        let (ps_tx, ps_rx): (Sender<PsTask>, Receiver<PsTask>) = async_channel::unbounded();
         let (ps_err_tx, ps_err_rx): (Sender<PsError>, Receiver<PsError>) =
             async_channel::unbounded();
-        spawn_powershell_worker(ps_rx, ps_err_tx);
 
         // Hotkey manager must stay alive for the lifetime of the application
         let hotkey_manager = setup_global_hotkey(tx);
@@ -1213,12 +1208,12 @@ fn main() {
         // Surface asynchronous PowerShell failures in the launcher itself. If
         // the bar was already dismissed, open a fresh window in the error state.
         let error_window = active_window.clone();
-        let error_ps_sender = ps_tx.clone();
+        let error_ps_tx = ps_err_tx.clone();
         let error_config_store = config_store.clone();
         cx.spawn(async move |cx| {
             while let Ok(err) = ps_err_rx.recv().await {
                 let active = error_window.clone();
-                let ps_sender = error_ps_sender.clone();
+                let ps_error_tx = error_ps_tx.clone();
                 let store = error_config_store.clone();
                 let message = err.message;
                 let _ = cx.update(move |cx| {
@@ -1229,7 +1224,7 @@ fn main() {
                             let handle = open_search_window(
                                 cx,
                                 active.clone(),
-                                ps_sender.clone(),
+                                ps_error_tx.clone(),
                                 store.clone(),
                             );
                             *active.borrow_mut() = Some(handle.clone());
@@ -1243,7 +1238,7 @@ fn main() {
                         })
                         .is_err()
                     {
-                        let handle = open_search_window(cx, active.clone(), ps_sender, store);
+                        let handle = open_search_window(cx, active.clone(), ps_error_tx, store);
                         *active.borrow_mut() = Some(handle.clone());
                         let _ = handle.update(cx, |bar, window, cx| {
                             bar.show_error(message, window, cx);
@@ -1255,17 +1250,17 @@ fn main() {
         .detach();
 
         let active_window_clone = active_window.clone();
-        let ps_tx_clone = ps_tx.clone();
+        let ps_err_tx_clone = ps_err_tx.clone();
         let hotkey_config_store = config_store.clone();
         cx.spawn(async move |cx| {
             // Keep hotkey_manager in the async task scope so it is never dropped
             let _manager = hotkey_manager;
             while let Ok(()) = rx.recv().await {
                 let active = active_window_clone.clone();
-                let ps_sender = ps_tx_clone.clone();
+                let ps_error_tx = ps_err_tx_clone.clone();
                 let store = hotkey_config_store.clone();
                 let _ = cx.update(move |cx| {
-                    toggle_search_window(cx, &active, &ps_sender, store);
+                    toggle_search_window(cx, &active, &ps_error_tx, store);
                 });
             }
         })
@@ -1276,12 +1271,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionKind, CandidateAction, CommandTarget, PsError, PsTask, Scope, resolve_command,
-        spawn_powershell_worker, split_scope,
+        ActionKind, CandidateAction, CommandTarget, PsError, Scope, resolve_command, run_ps_task,
+        split_scope,
     };
     use crate::commands::InternalCommand;
     use crate::config::{AppAction, Config, PsAction};
-    use async_channel::{Receiver, Sender};
     use std::path::PathBuf;
 
     fn test_config() -> Config {
@@ -1442,20 +1436,12 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_reports_missing_argument_to_ui_channel() {
-        let (task_tx, task_rx): (Sender<PsTask>, Receiver<PsTask>) = async_channel::unbounded();
-        let (error_tx, error_rx): (Sender<PsError>, Receiver<PsError>) = async_channel::unbounded();
-        spawn_powershell_worker(task_rx, error_tx);
+    fn test_run_ps_task_reports_missing_argument_to_ui_channel() {
+        let (error_tx, error_rx) = async_channel::unbounded::<PsError>();
 
-        task_tx
-            .send_blocking(PsTask {
-                function_name: "brightness".to_string(),
-                function_body: "{ [int]$args[0] }".to_string(),
-                dynamic_tokens: Vec::new(),
-            })
-            .expect("task accepted");
+        run_ps_task("brightness", "{ [int]$args[0] }", &[], &error_tx);
 
-        let error = error_rx.recv_blocking().expect("error reported to UI");
+        let error = error_rx.try_recv().expect("error reported to UI");
         assert_eq!(error.message, "brightness: requires at least one argument");
     }
 }
