@@ -342,29 +342,54 @@ path stays I/O-free.
 
 ## 11. Installation & System Provisioning
 
-*Status: Not Yet Decided*
+### Overview & Security Boundaries
+- Non-elevated execution context (standard user token) to maintain User Interface Privilege
+  Isolation (UIPI) parity with target desktop applications and window messaging;
+- Deterministic installation root: `%LOCALAPPDATA%\Programs\shyena\shyena.exe`;
+- User-level environment integration via User `PATH` and `HKCU` registry hives;
 
-### Architectural Considerations
-- Clean, one-liner PowerShell installation script (`install.ps1`);
-- Deterministic installation directories (e.g. `%LOCALAPPDATA%\shyena\`);
-- Seeding default `.shyena` configuration templates upon initial installation;
+### Process Lifecycle & Installation Pipeline (`install.ps1`)
+1. **Environment Validation**:
+   - Verification of 64-bit architecture (`[Environment]::Is64BitOperatingSystem`);
+   - Windows 10/11 build constraint verification (`Build >= 19041` for modern DWM/Composition APIs);
+   - Elevation rejection: warns or prevents running under elevated Administrator token;
+2. **Locked Executable Mitigation**:
+   - Windows returns `ERROR_ACCESS_DENIED` (`0x05`) on writes to active PE files;
+   - Terminate active `shyena` instances before replacement via `Stop-Process`;
+3. **Binary Deployment**:
+   - Copy `shyena.exe` to `$env:LOCALAPPDATA\Programs\shyena\shyena.exe`;
+   - Append installation directory to user environment variable `Path`;
+4. **Configuration Seeding**:
+   - Primary target: `~/.config/.shyena` (`$env:USERPROFILE\.config\.shyena`);
+   - Writes default theme and initial `@app` / `#ps` bindings only if the file is absent;
+5. **Autostart Persistence (HKCU Run Key)**:
+   - Registers entry under `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`:
+     - Value Name: `"Shyena"`;
+     - Value Type: `REG_SZ`;
+     - Value Data: `"\"$env:LOCALAPPDATA\Programs\shyena\shyena.exe\""` (strictly quoted);
+   - Native integration with Windows Task Manager Startup Apps tab without helper services;
+   - Zero background polling or daemon overhead; executed once by `explorer.exe` at logon;
+6. **Immediate Detached Launch**:
+   - Invoked via `Start-Process -FilePath $binTarget -WorkingDirectory $installDir`;
+   - Zero console flash when binary uses `#![windows_subsystem = "windows"]` (`0x02`);
 
 ---
 
 ## 12. Update Mechanism
 
-*Status: Not Yet Decided*
-
-### Architectural Considerations
-- In-place binary replacement strategy on Windows without encountering locked-executable errors (`ERROR_ACCESS_DENIED`);
-- Release asset verification and automated fetching from release channels;
+### Architectural Strategy
+- Self-contained updater routine or re-entrant `install.ps1`;
+- Graceful termination of the active instance prior to binary overwrite;
+- Validation of release assets against expected cryptographic checksums before replacement;
 
 ---
 
 ## 13. Uninstallation & System Cleanup
 
-*Status: Not Yet Decided*
-
-### Architectural Considerations
-- Dedicated uninstallation script (`uninstall.ps1`);
-- Complete removal of autostart keys, registered shortcuts, cached binaries, and configuration folders;
+### Architectural Strategy (`uninstall.ps1`)
+- Terminate any running `shyena.exe` processes;
+- Unregister the autostart key from `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`;
+- Remove the installation directory (`%LOCALAPPDATA%\Programs\shyena`);
+- Clean user `Path` environment variable;
+- Retain `~/.config/.shyena` by default to preserve user definitions unless explicit `-PurgeConfig`
+  flag is provided;
