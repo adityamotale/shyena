@@ -87,16 +87,17 @@ impl Config {
         }
     }
 
-    fn create_default_config(path: &Path) -> Self {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+    /// Configuration seeded on first launch; also the canonical multi-arg example.
+    const DEFAULT_SHYENA: &str = r#"# Shyena Configuration (~/.config/.shyena)
 
-        const DEFAULT_SHYENA: &str = r#"# Shyena Configuration (~/.config/.shyena)
+Register-App 'helium' @{
+    Path = 'C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe'
+    Args = @()
+}
 
-Register-App 'code' @{
-    Path = 'code'
-    Args = @('--reuse-window')
+Register-App 'chat' @{
+    Path = 'C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe'
+    Args = @('--start-fullscreen', 'https://chatgpt.com')
 }
 
 function echo {
@@ -109,8 +110,14 @@ function brightness {
     $wmi.WmiSetBrightness(1, $target)
 }
 "#;
-        let _ = std::fs::write(path, DEFAULT_SHYENA);
-        let ast = parser::Scanner::new(DEFAULT_SHYENA).parse();
+
+    fn create_default_config(path: &Path) -> Self {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let _ = std::fs::write(path, Self::DEFAULT_SHYENA);
+        let ast = parser::Scanner::new(Self::DEFAULT_SHYENA).parse();
         match ast {
             Ok(ref tree) => Self::from_ast(tree),
             Err(_) => Self::default(),
@@ -351,6 +358,25 @@ function brightness {
         let brightness = cfg.ps.get("brightness").expect("brightness exists");
         assert!(brightness.script.contains("function brightness"));
         assert!(brightness.script.ends_with("brightness @args"));
+    }
+
+    #[test]
+    fn test_default_config_declares_chat_with_multiple_args() {
+        let ast = Scanner::new(Config::DEFAULT_SHYENA).parse().expect("default config parses");
+        let cfg = Config::from_ast(&ast);
+
+        assert_eq!(cfg.apps.len(), 0x02);
+        assert!(!cfg.apps.contains_key("code"));
+
+        let helium = cfg.apps.get("helium").expect("helium exists");
+        assert_eq!(helium.args, Vec::<String>::new());
+
+        let chat = cfg.apps.get("chat").expect("chat exists");
+        assert_eq!(
+            chat.path,
+            PathBuf::from("C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe")
+        );
+        assert_eq!(chat.args, vec!["--start-fullscreen", "https://chatgpt.com"]);
     }
 
     #[test]
