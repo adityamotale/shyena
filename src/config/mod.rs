@@ -114,9 +114,14 @@ function echo {
 }
 
 function brightness {
-    $target = [int]$args[0]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 100)]
+        [int]$Level
+    )
+
     $wmi = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods
-    $wmi.WmiSetBrightness(1, $target)
+    $wmi.WmiSetBrightness(1, $Level)
 }
 "#;
 
@@ -391,6 +396,17 @@ function brightness {
             PathBuf::from("C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe")
         );
         assert_eq!(chat.args, vec!["--start-fullscreen", "https://chatgpt.com"]);
+    }
+
+    #[test]
+    fn test_default_brightness_requires_explicit_level() {
+        let ast = Scanner::new(Config::DEFAULT_SHYENA).parse().expect("default config parses");
+        let cfg = Config::from_ast(&ast);
+        let brightness = cfg.ps.get("brightness").expect("brightness exists");
+
+        assert!(brightness.body.contains("Parameter(Mandatory = $true)"));
+        assert!(brightness.body.contains("ValidateRange(0, 100)"));
+        assert!(!brightness.body.contains("$args["));
     }
 
     #[test]

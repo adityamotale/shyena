@@ -72,6 +72,8 @@ Queries follow a clean tokenizer contract:
 - **Command / Automation (`#ps`)**: Clean `[ EXEC ]` badge with peach accent;
 - **Resolution Precedence**: Scoped prefix (`@`/`#`) -> selected candidate -> exact
   dictionary key match -> fallback execution;
+- **Error**: A failed command replaces the bar in place with a one-line diagnostic; `[Esc]`
+  dismisses it and returns to an empty `Idle` bar (see §9);
 
 ### Candidate Ranking Precedence
 1. Exact match on target key (case-insensitive);
@@ -126,6 +128,11 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
        # Execution logic...
    }
    ```
+
+Functions that require dynamic tokens should declare them as mandatory parameters (as shown in the
+`brightness` example), so PowerShell rejects a zero-argument invocation instead of coercing it to a
+default value. Shyena additionally rejects zero-token invocations of functions that index
+`$args[...]` (see §9).
 
 ---
 
@@ -235,11 +242,14 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
   foreground window focus;
 - **Diagnostic-Aware Execution**: Worker thread processes `PsTask` queue by constructing a
   self-contained execution block (`& { function ... }`); strictly encodes the payload to
-  UTF-16LE Base64 and executes via `pwsh` (fallback to `powershell`) using `-ExecutionPolicy Bypass`
-  and `CREATE_NO_WINDOW` (`0x0800_0000`);
-- **Error Surfacing**: Instead of detached 'fire-and-forget' spawning, the worker awaits `.output()`
-  to capture `stderr`, preventing silent failures and passing localized PowerShell errors back
-  to the UI diagnostic overlay;
+  UTF-16LE Base64 and executes via Windows PowerShell 5.1 (`pwsh` as fallback) using
+  `-ExecutionPolicy Bypass` and `CREATE_NO_WINDOW` (`0x0800_0000`);
+- **Error Surfacing**: `dispatch_ps_function` captures `stderr` through redirected temp files
+  (avoiding GUI-child pipe hangs) and returns it on non-zero exit; the worker sends a condensed
+  `PsError` over an `async-channel` to the GPUI diagnostic overlay instead of writing a log file;
+- **Missing-Argument Guard**: Functions indexing `$args[...]` are rejected before spawning
+  PowerShell when no dynamic tokens were supplied, preventing `[int]$null` -> `0` coercion;
+  functions with mandatory parameters rely on PowerShell's own binding error;
 - **Native Process Spawn**: Direct invocation of binary paths with static and dynamic arguments
   via `std::process::Command::spawn()`;
 
@@ -253,12 +263,26 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 
 ## 9. Error Diagnostics & Visual Reporting
 
-*Status: Not Yet Decided*
+*Status: Implemented (execution errors)*
 
-### Architectural Considerations
-- Layout and styling of in-place error presentation inside the search bar interface;
-- Handling configuration syntax/parse errors gracefully during startup and reloading;
-- Capturing PowerShell execution errors/tracebacks and presenting them cleanly with `[Esc]` dismissal behavior;
+### Error State Machine
+- **Idle**: Normal search bar with query, action tag, and candidate list;
+- **Error**: A failed command replaces the bar in place with a red-framed `shyena::error` panel
+  showing one condensed message line; input is ignored while this state is active;
+- **Dismissal**: `[Esc]` clears the error and returns to an empty `Idle` bar in the same window,
+  ready for a retry;
+- **Late Errors**: If the launcher was already dismissed when the worker reports the failure, a
+  new window is opened directly in the `Error` state;
+
+### Reported Failures
+- **Missing dynamic arguments**: Zero-token invocations of functions that index `$args[...]` are
+  rejected locally; mandatory `param(...)` declarations produce PowerShell's binding error;
+- **PowerShell failures**: Non-zero exit status / `stderr` (including Windows PowerShell 5.1
+  CLIXML records) is reduced to its first meaningful line, whitespace-collapsed, truncated to
+  120 characters, and prefixed with the command name;
+- **Configuration errors**: `Config::load` parse failures currently log to `stderr` and fall back
+  to an empty config; the §10 watcher emits `ReloadEvent::Error`, but routing it through this
+  overlay is still pending;
 
 ---
 

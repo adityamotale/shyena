@@ -119,24 +119,25 @@ pub struct PsTask {
     pub dynamic_tokens: Vec<String>,
 }
 
-fn spawn_powershell_worker(rx: Receiver<PsTask>) {
+#[derive(Clone, Debug)]
+pub struct PsError {
+    pub message: String,
+}
+
+fn spawn_powershell_worker(rx: Receiver<PsTask>, error_tx: Sender<PsError>) {
     thread::spawn(move || {
         while let Ok(task) = rx.recv_blocking() {
-            execute_powershell_task(task);
+            execute_powershell_task(task, &error_tx);
         }
     });
 }
 
-fn execute_powershell_task(task: PsTask) {
+fn execute_powershell_task(task: PsTask, error_tx: &Sender<PsError>) {
     let args: Vec<&str> = task.dynamic_tokens.iter().map(|s| s.as_str()).collect();
     if let Err(err) = exec::dispatch_ps_function(&task.function_name, &task.function_body, &args) {
-        // Log to file since stdout/stderr are hidden in Windows GUI apps
-        let log_path = std::env::temp_dir().join("shyena-ps-error.log");
-        let _ = std::fs::write(
-            &log_path, 
-            format!("Error in {}:\n{}", task.function_name, err)
-        );
-        eprintln!("Logged error to {:?}: {}", log_path, err);
+        let _ = error_tx.send_blocking(PsError {
+            message: exec::format_ps_error(&task.function_name, &err),
+        });
     }
 }
 
@@ -161,6 +162,7 @@ struct SearchBar {
     theme: Theme,
     selected_index: usize,
     filtered_actions: Vec<CandidateAction>,
+    error: Option<String>,
 }
 
 impl SearchBar {
@@ -200,6 +202,7 @@ impl SearchBar {
             theme,
             selected_index: 0,
             filtered_actions: Vec::new(),
+            error: None,
         };
         instance.update_filtered_actions(window);
         instance
@@ -296,6 +299,109 @@ impl SearchBar {
         let diff: f32 = (current_size.height - target_height).into();
         if diff.abs() > 0.5 {
             window.resize(size(current_size.width, target_height));
+        }
+    }
+
+    fn resize_to_bar(&self, window: &mut Window) {
+        let current_size = window.bounds().size;
+        let target_height = px(BAR_HEIGHT);
+        let diff: f32 = (current_size.height - target_height).into();
+        if diff.abs() > 0.5 {
+            window.resize(size(current_size.width, target_height));
+        }
+    }
+
+    fn show_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = Some(message);
+        self.query.clear();
+        self.filtered_actions.clear();
+        self.selected_index = 0;
+        self.resize_to_bar(window);
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn dismiss_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        self.query.clear();
+        self.update_filtered_actions(window);
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn handle_key(
+        this: &mut Self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if this.error.is_some() {
+            if event.keystroke.key == "escape" {
+                this.dismiss_error(window, cx);
+            }
+            return;
+        }
+
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                *this.active_window.borrow_mut() = None;
+                window.remove_window();
+            }
+            "down" => {
+                if !this.filtered_actions.is_empty() {
+                    this.selected_index = (this.selected_index + 1) % this.filtered_actions.len();
+                    cx.notify();
+                }
+            }
+            "up" => {
+                if !this.filtered_actions.is_empty() {
+                    this.selected_index = if this.selected_index == 0 {
+                        this.filtered_actions.len() - 1
+                    } else {
+                        this.selected_index - 1
+                    };
+                    cx.notify();
+                }
+            }
+            "tab" => {
+                if let Some(candidate) = this.filtered_actions.get(this.selected_index) {
+                    // Keep the active @/# scope so dynamic args still resolve
+                    // to the same action when Enter is pressed.
+                    let scope = this
+                        .query
+                        .trim_start()
+                        .chars()
+                        .next()
+                        .filter(|c| *c == '@' || *c == '#')
+                        .map(|c| c.to_string())
+                        .unwrap_or_default();
+                    this.query = format!("{}{} ", scope, candidate.key);
+                    this.update_filtered_actions(window);
+                    cx.notify();
+                }
+            }
+            "enter" => {
+                this.execute(window);
+            }
+            "backspace" => {
+                this.query.pop();
+                this.update_filtered_actions(window);
+                cx.notify();
+            }
+            _ => {
+                if let Some(ch) = &event.keystroke.key_char {
+                    this.query.push_str(ch);
+                } else if event.keystroke.key == "space" {
+                    // GPUI reports Space as the immutable key "space" with no key_char.
+                    this.query.push(' ');
+                } else if event.keystroke.key.chars().count() == 1 {
+                    this.query.push_str(&event.keystroke.key);
+                } else {
+                    return;
+                }
+                this.update_filtered_actions(window);
+                cx.notify();
+            }
         }
     }
 
@@ -403,71 +509,11 @@ impl Render for SearchBar {
             Some(("EXEC", theme.peach()))
         };
 
-        div()
+        let root = div()
             .track_focus(&self.focus_handle)
             .key_context("terminal_bar")
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => {
-                        *this.active_window.borrow_mut() = None;
-                        window.remove_window();
-                    }
-                    "down" => {
-                        if !this.filtered_actions.is_empty() {
-                            this.selected_index = (this.selected_index + 1) % this.filtered_actions.len();
-                            cx.notify();
-                        }
-                    }
-                    "up" => {
-                        if !this.filtered_actions.is_empty() {
-                            this.selected_index = if this.selected_index == 0 {
-                                this.filtered_actions.len() - 1
-                            } else {
-                                this.selected_index - 1
-                            };
-                            cx.notify();
-                        }
-                    }
-                    "tab" => {
-                        if let Some(candidate) = this.filtered_actions.get(this.selected_index) {
-                            // Keep the active @/# scope so dynamic args still resolve
-                            // to the same action when Enter is pressed.
-                            let scope = this
-                                .query
-                                .trim_start()
-                                .chars()
-                                .next()
-                                .filter(|c| *c == '@' || *c == '#')
-                                .map(|c| c.to_string())
-                                .unwrap_or_default();
-                            this.query = format!("{}{} ", scope, candidate.key);
-                            this.update_filtered_actions(window);
-                            cx.notify();
-                        }
-                    }
-                    "enter" => {
-                        this.execute(window);
-                    }
-                    "backspace" => {
-                        this.query.pop();
-                        this.update_filtered_actions(window);
-                        cx.notify();
-                    }
-                    _ => {
-                        if let Some(ch) = &event.keystroke.key_char {
-                            this.query.push_str(ch);
-                        } else if event.keystroke.key == "space" {
-                            // GPUI reports Space as the immutable key "space" with no key_char.
-                            this.query.push(' ');
-                        } else if event.keystroke.key.chars().count() == 1 {
-                            this.query.push_str(&event.keystroke.key);
-                        } else {
-                            return;
-                        }
-                        this.update_filtered_actions(window);
-                        cx.notify();
-                    }
-                }
+            .on_key_down(cx.listener(|this, event, window, cx| {
+                Self::handle_key(this, event, window, cx)
             }))
             .size_full()
             .flex()
@@ -476,8 +522,74 @@ impl Render for SearchBar {
             .bg(theme.terminal_bg())
             .rounded(px(0.0))
             .border_1()
-            .border_color(theme.terminal_frame())
-            .overflow_hidden()
+            .border_color(if self.error.is_some() {
+                theme.red()
+            } else {
+                theme.terminal_frame()
+            })
+            .overflow_hidden();
+
+        // Error state replaces the search bar entirely; [Esc] returns to an
+        // empty bar in the same window.
+        if let Some(message) = self.error.clone() {
+            return root
+                .child(
+                    div()
+                        .h(px(20.0))
+                        .px(px(10.0))
+                        .bg(theme.terminal_header())
+                        .border_b_1()
+                        .border_color(theme.red())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .text_size(px(10.5))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(div().text_color(theme.red()).child("┌─["))
+                                .child(div().text_color(theme.red()).child("shyena::error"))
+                                .child(div().text_color(theme.red()).child("]")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_color(theme.subtext0())
+                                        .child("[ ESC: continue ]"),
+                                )
+                                .child(div().text_color(theme.red()).child("─┐")),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(BAR_HEIGHT - 20.0))
+                        .flex()
+                        .items_center()
+                        .px(px(12.0))
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .text_color(theme.red())
+                                .text_size(px(14.0))
+                                .child("✗"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(theme.text())
+                                .text_size(px(12.5))
+                                .child(message),
+                        ),
+                );
+        }
+
+        root
             // Top ASCII TUI header bracket
             .child(
                 div()
@@ -805,12 +917,52 @@ fn main() {
 
         let (tx, rx): (Sender<()>, Receiver<()>) = async_channel::unbounded();
         let (ps_tx, ps_rx): (Sender<PsTask>, Receiver<PsTask>) = async_channel::unbounded();
-        spawn_powershell_worker(ps_rx);
+        let (ps_err_tx, ps_err_rx): (Sender<PsError>, Receiver<PsError>) =
+            async_channel::unbounded();
+        spawn_powershell_worker(ps_rx, ps_err_tx);
 
         // Hotkey manager must stay alive for the lifetime of the application
         let hotkey_manager = setup_global_hotkey(tx);
         let active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>> =
             Rc::new(RefCell::new(None));
+
+        // Surface asynchronous PowerShell failures in the launcher itself. If
+        // the bar was already dismissed, open a fresh window in the error state.
+        let error_window = active_window.clone();
+        let error_ps_sender = ps_tx.clone();
+        cx.spawn(async move |cx| {
+            while let Ok(err) = ps_err_rx.recv().await {
+                let active = error_window.clone();
+                let ps_sender = error_ps_sender.clone();
+                let message = err.message;
+                let _ = cx.update(move |cx| {
+                    let handle = active.borrow().as_ref().cloned();
+                    let handle = match handle {
+                        Some(handle) => handle,
+                        None => {
+                            let handle =
+                                open_search_window(cx, active.clone(), ps_sender.clone());
+                            *active.borrow_mut() = Some(handle.clone());
+                            handle
+                        }
+                    };
+
+                    if handle
+                        .update(cx, |bar, window, cx| {
+                            bar.show_error(message.clone(), window, cx);
+                        })
+                        .is_err()
+                    {
+                        let handle = open_search_window(cx, active.clone(), ps_sender);
+                        *active.borrow_mut() = Some(handle.clone());
+                        let _ = handle.update(cx, |bar, window, cx| {
+                            bar.show_error(message, window, cx);
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
 
         let active_window_clone = active_window.clone();
         let ps_tx_clone = ps_tx.clone();
@@ -827,4 +979,28 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PsError, PsTask, spawn_powershell_worker};
+    use async_channel::{Receiver, Sender};
+
+    #[test]
+    fn test_worker_reports_missing_argument_to_ui_channel() {
+        let (task_tx, task_rx): (Sender<PsTask>, Receiver<PsTask>) = async_channel::unbounded();
+        let (error_tx, error_rx): (Sender<PsError>, Receiver<PsError>) = async_channel::unbounded();
+        spawn_powershell_worker(task_rx, error_tx);
+
+        task_tx
+            .send_blocking(PsTask {
+                function_name: "brightness".to_string(),
+                function_body: "{ [int]$args[0] }".to_string(),
+                dynamic_tokens: Vec::new(),
+            })
+            .expect("task accepted");
+
+        let error = error_rx.recv_blocking().expect("error reported to UI");
+        assert_eq!(error.message, "brightness: requires at least one argument");
+    }
 }
