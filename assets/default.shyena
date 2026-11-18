@@ -1,0 +1,251 @@
+# =============================================================================
+# Shyena default configuration
+#
+# Installed at %USERPROFILE%\.config\.shyena by install.ps1 when no configuration
+# exists. Shyena reads this file once at startup; after editing, run ":reload"
+# from the launcher or restart Shyena to apply changes.
+#
+# Scopes:  @  registered applications     #  PowerShell functions
+#          :  built-in system commands
+# Example: type "# brightness 60" and press Enter.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# INTERNAL CONFIG
+# -----------------------------------------------------------------------------
+
+# Theme controls the palette: "dark" (Catppuccin Macchiato) or "light"
+# (Catppuccin Latte). Values are case-insensitive.
+Set-Theme 'dark'
+
+# Suggestions controls the candidate list: "on" shows it, "off" hides it.
+# With suggestions off, type an exact command key and press Enter.
+Set-Suggestions 'on'
+
+# -----------------------------------------------------------------------------
+# APPLICATIONS (@)
+# -----------------------------------------------------------------------------
+# Syntax:  Register-App '<key>' @{
+#              Path = '<executable>'
+#              Args = @('<argument>'[, '<argument>'...])
+#          }
+# Arguments are static; dynamic tokens typed after the key are appended.
+
+# Open Windows Notepad
+Register-App 'notepad' @{
+    Path = 'C:\Windows\System32\notepad.exe'
+    Args = @()
+}
+
+# Open File Explorer
+Register-App 'explorer' @{
+    Path = 'C:\Windows\explorer.exe'
+    Args = @()
+}
+
+# Example with static arguments (uncomment and adapt to your own files):
+# Register-App 'notes' @{
+#     Path = 'C:\Windows\System32\notepad.exe'
+#     Args = @('C:\Users\<you>\notes.txt')
+# }
+
+# -----------------------------------------------------------------------------
+# DISPLAY
+# -----------------------------------------------------------------------------
+
+# brightness <0-100> - set the internal display brightness.
+# Usage:  # brightness 60
+# Note:   Requires an internal laptop panel that exposes the WMI brightness
+#         methods. Desktop and external monitors are not supported.
+# -----------------------------------------------------------------------------
+function brightness {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 100)]
+        [int]$Level
+    )
+
+    $displays = @(Get-CimInstance -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue)
+    if ($displays.Count -eq 0) {
+        throw 'No WMI-controllable display was found.'
+    }
+
+    foreach ($display in $displays) {
+        $display.WmiSetBrightness(1, $Level)
+    }
+}
+
+# -----------------------------------------------------------------------------
+# AUDIO
+# -----------------------------------------------------------------------------
+
+# volume <0-100> - set the system master volume.
+# Usage:  # volume 40
+# Note:   Uses the Windows Core Audio COM interface through an inline type
+#         definition; no additional software is required.
+# -----------------------------------------------------------------------------
+function volume {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 100)]
+        [int]$Level
+    )
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class MMDeviceEnumerator { }
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator
+{
+    [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
+    [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+    [PreserveSig] int GetDevice(string id, out IMMDevice device);
+    [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
+    [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceCollection
+{
+    [PreserveSig] int GetCount(out int count);
+    [PreserveSig] int Item(int index, out IMMDevice device);
+}
+
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice
+{
+    [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, out IAudioEndpointVolume endpoint);
+    [PreserveSig] int GetId(out IntPtr id);
+    [PreserveSig] int GetState(out int state);
+}
+
+[ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioEndpointVolume
+{
+    [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
+    [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
+    [PreserveSig] int GetChannelCount(out int count);
+    [PreserveSig] int SetMasterVolumeLevel(float levelDb, ref Guid context);
+    [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid context);
+    [PreserveSig] int GetMasterVolumeLevel(out float levelDb);
+    [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+    [PreserveSig] int SetChannelVolumeLevel(int channel, float levelDb, ref Guid context);
+    [PreserveSig] int SetChannelVolumeLevelScalar(int channel, float level, ref Guid context);
+    [PreserveSig] int GetChannelVolumeLevel(int channel, out float levelDb);
+    [PreserveSig] int GetChannelVolumeLevelScalar(int channel, out float level);
+    [PreserveSig] int SetMute(bool mute, ref Guid context);
+    [PreserveSig] int GetMute(out bool mute);
+    [PreserveSig] int GetVolumeStepInfo(out int step, out int stepCount);
+    [PreserveSig] int VolumeStepUp(ref Guid context);
+    [PreserveSig] int VolumeStepDown(ref Guid context);
+    [PreserveSig] int QueryHardwareSupport(out int mask);
+    [PreserveSig] int GetVolumeRange(out float minDb, out float maxDb, out float incrementDb);
+}
+
+public static class ShyenaAudio
+{
+    public static void SetVolume(int level)
+    {
+        IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDevice device;
+        enumerator.GetDefaultAudioEndpoint(0, 0, out device);
+        Guid iid = typeof(IAudioEndpointVolume).GUID;
+        IAudioEndpointVolume endpoint;
+        device.Activate(ref iid, 1, IntPtr.Zero, out endpoint);
+        Guid context = Guid.Empty;
+        endpoint.SetMasterVolumeLevelScalar(level / 100f, ref context);
+    }
+}
+'@
+    [ShyenaAudio]::SetVolume($Level)
+}
+
+# volume-up - raise the master volume by one step.
+# Usage:  # volume-up
+# -----------------------------------------------------------------------------
+function volume-up {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ShyenaKey {
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+}
+'@
+    [ShyenaKey]::keybd_event(0xAF, 0, 0, [UIntPtr]::Zero)
+    [ShyenaKey]::keybd_event(0xAF, 0, 2, [UIntPtr]::Zero)
+}
+
+# volume-down - lower the master volume by one step.
+# Usage:  # volume-down
+# -----------------------------------------------------------------------------
+function volume-down {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ShyenaKey {
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+}
+'@
+    [ShyenaKey]::keybd_event(0xAE, 0, 0, [UIntPtr]::Zero)
+    [ShyenaKey]::keybd_event(0xAE, 0, 2, [UIntPtr]::Zero)
+}
+
+# mute - toggle the system mute state.
+# Usage:  # mute
+# -----------------------------------------------------------------------------
+function mute {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ShyenaKey {
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+}
+'@
+    [ShyenaKey]::keybd_event(0xAD, 0, 0, [UIntPtr]::Zero)
+    [ShyenaKey]::keybd_event(0xAD, 0, 2, [UIntPtr]::Zero)
+}
+
+# -----------------------------------------------------------------------------
+# SYSTEM
+# -----------------------------------------------------------------------------
+
+# lock - lock the workstation immediately.
+# Usage:  # lock
+# -----------------------------------------------------------------------------
+function lock { rundll32.exe user32.dll,LockWorkStation }
+
+# power-off - shut down the computer immediately.
+# Usage:  # power-off
+# Note:   There is no confirmation prompt.
+# -----------------------------------------------------------------------------
+function power-off { Stop-Computer }
+
+# power-restart - restart the computer immediately.
+# Usage:  # power-restart
+# Note:   There is no confirmation prompt.
+# -----------------------------------------------------------------------------
+function power-restart { Restart-Computer }
+
+# power-signout - sign out the current user immediately.
+# Usage:  # power-signout
+# Note:   Unsaved work in other applications may be lost.
+# -----------------------------------------------------------------------------
+function power-signout { shutdown /l }
+
+# power-suspend - put the computer to sleep.
+# Usage:  # power-suspend
+# Note:   Wake events remain enabled; no applications are force-closed.
+# -----------------------------------------------------------------------------
+function power-suspend {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetSuspendState(
+        [System.Windows.Forms.PowerState]::Suspend, $false, $false
+    )
+}

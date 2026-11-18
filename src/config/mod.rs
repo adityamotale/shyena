@@ -106,42 +106,12 @@ impl Config {
         }
     }
 
-    /// Canonical default config content (used by tests and as the documented
-    /// seed for install.ps1); the binary no longer writes it on startup.
-    #[allow(dead_code)]
-    const DEFAULT_SHYENA: &str = r#"# Shyena Configuration (~/.config/.shyena)
-
-# Theme: 'dark' = Catppuccin Macchiato, 'light' = Catppuccin Latte
-Set-Theme 'dark'
-
-# Suggestions: 'on' shows the candidate list, 'off' hides it
-Set-Suggestions 'on'
-
-Register-App 'helium' @{
-    Path = 'C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe'
-    Args = @()
-}
-
-Register-App 'chat' @{
-    Path = 'C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe'
-    Args = @('--start-fullscreen', 'https://chatgpt.com')
-}
-
-function echo {
-    Write-Output $args
-}
-
-function brightness {
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateRange(0, 100)]
-        [int]$Level
-    )
-
-    $wmi = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods
-    $wmi.WmiSetBrightness(1, $Level)
-}
-"#;
+    /// Canonical default config, embedded from `assets/default.shyena` so the
+    /// repository template is the single source of truth for tests. The actual
+    /// file is copied to `~/.config/.shyena` by `install.ps1`; the binary never
+    /// writes it.
+    #[cfg(test)]
+    const DEFAULT_SHYENA: &str = include_str!("../../assets/default.shyena");
 }
 
 #[cfg(test)]
@@ -186,35 +156,72 @@ function brightness {
     }
 
     #[test]
-    fn test_default_config_declares_chat_with_multiple_args() {
-        let ast = Scanner::new(Config::DEFAULT_SHYENA).parse().expect("default config parses");
+    fn test_default_config_parses_with_portable_app_registrations() {
+        let ast = Scanner::new(Config::DEFAULT_SHYENA)
+            .parse()
+            .expect("default config parses");
         let cfg = Config::from_ast(&ast);
 
-        assert_eq!(cfg.apps.len(), 0x02);
-        assert!(!cfg.apps.contains_key("code"));
         assert_eq!(cfg.theme, Theme::Dark);
         assert_eq!(cfg.suggestions, Suggestions::On);
+        assert_eq!(cfg.apps.len(), 0x02);
 
-        let helium = cfg.apps.get("helium").expect("helium exists");
-        assert_eq!(helium.args, Vec::<String>::new());
-
-        let chat = cfg.apps.get("chat").expect("chat exists");
+        let notepad = cfg.apps.get("notepad").expect("notepad exists");
         assert_eq!(
-            chat.path,
-            PathBuf::from("C:/Users/froze/AppData/Local/imput/Helium/Application/chrome.exe")
+            notepad.path,
+            PathBuf::from(r"C:\Windows\System32\notepad.exe")
         );
-        assert_eq!(chat.args, vec!["--start-fullscreen", "https://chatgpt.com"]);
+        assert_eq!(notepad.args, Vec::<String>::new());
+
+        let explorer = cfg.apps.get("explorer").expect("explorer exists");
+        assert_eq!(explorer.path, PathBuf::from(r"C:\Windows\explorer.exe"));
+        assert_eq!(explorer.args, Vec::<String>::new());
     }
 
     #[test]
-    fn test_default_brightness_requires_explicit_level() {
-        let ast = Scanner::new(Config::DEFAULT_SHYENA).parse().expect("default config parses");
+    fn test_default_config_declares_all_utility_functions() {
+        let ast = Scanner::new(Config::DEFAULT_SHYENA)
+            .parse()
+            .expect("default config parses");
         let cfg = Config::from_ast(&ast);
-        let brightness = cfg.ps.get("brightness").expect("brightness exists");
 
-        assert!(brightness.body.contains("Parameter(Mandatory = $true)"));
-        assert!(brightness.body.contains("ValidateRange(0, 100)"));
-        assert!(!brightness.body.contains("$args["));
+        let expected = [
+            "brightness",
+            "volume",
+            "volume-up",
+            "volume-down",
+            "mute",
+            "lock",
+            "power-off",
+            "power-restart",
+            "power-signout",
+            "power-suspend",
+        ];
+        assert_eq!(cfg.ps.len(), expected.len());
+        for name in expected {
+            assert!(cfg.ps.contains_key(name), "missing function: {name}");
+        }
+    }
+
+    #[test]
+    fn test_default_brightness_and_volume_require_explicit_level() {
+        let ast = Scanner::new(Config::DEFAULT_SHYENA)
+            .parse()
+            .expect("default config parses");
+        let cfg = Config::from_ast(&ast);
+
+        for name in ["brightness", "volume"] {
+            let action = cfg.ps.get(name).expect("function exists");
+            assert!(
+                action.body.contains("Parameter(Mandatory = $true)"),
+                "{name} has a mandatory parameter"
+            );
+            assert!(
+                action.body.contains("ValidateRange(0, 100)"),
+                "{name} validates the range"
+            );
+            assert!(!action.body.contains("$args["), "{name} uses a param block");
+        }
     }
 
     #[test]

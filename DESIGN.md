@@ -104,6 +104,29 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
 ### Target Path
 - Primary path: `~/.config/.shyena`;
 
+### Default Configuration Template
+
+The canonical starter file lives in the repository at `assets/default.shyena` and is embedded into
+the binary for tests via `include_str!` in `src/config/mod.rs`. `install.ps1` copies it to
+`~/.config/.shyena` on first install (§11); Shyena itself never creates the file (§10).
+
+The template is organised into clearly labelled sections, in this order:
+
+1. **Header** — schema marker (`# shyena:v1`), install location, reload instructions, and the
+   `@` / `#` / `:` scope prefixes with a copy-paste usage example;
+2. **BEHAVIOR** — `Set-Theme` and `Set-Suggestions`, both declared explicitly;
+3. **APPLICATIONS (`@`)** — portable `Register-App` examples (Notepad, Explorer) plus a commented
+   multi-argument template;
+4. **DISPLAY** — `brightness` with a mandatory `0-100` level and a WMI capability guard;
+5. **AUDIO** — `volume` (exact level via Core Audio COM), `volume-up`, `volume-down`, and `mute`;
+6. **SYSTEM** — `lock`, `power-off`, `power-restart`, `power-signout`, and `power-suspend`;
+
+Every command is preceded by a documentation block with a one-line summary, a `Usage:` line showing
+the `#` scope, and a `Note:` line for prerequisites or caveats. Comments are ignored by the scanner,
+so they can be as thorough as needed. Function names use a consistent `volume-*` / `power-*` prefix
+so related commands group together in prefix search, and so they do not collide with PowerShell
+aliases such as `stop` or `sleep`.
+
 ### Language Construct Rules
 1. **Theme Selection (`Set-Theme`)**:
    Top-level quoted value selecting the palette: `'dark'` maps to Catppuccin Macchiato,
@@ -120,9 +143,9 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
 3. **Application Registration (`Register-App`)**:
    Static definitions for binaries and fixed arguments with zero dynamic parameter logic:
    ```powershell
-   Register-App 'code' @{
-       Path = 'C:/Users/froze/AppData/Local/Programs/Microsoft VS Code/Code.exe'
-       Args = @('--reuse-window')
+   Register-App 'notepad' @{
+       Path = 'C:\Windows\System32\notepad.exe'
+       Args = @()
    }
    ```
 4. **PowerShell Automation Functions (`function <name>`)**:
@@ -135,9 +158,13 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
            [int]$Level
        )
 
-       $initial = [Math]::Max(0, $Level - 10)
-       $wmi = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods
-       # Execution logic...
+       $displays = @(Get-CimInstance -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue)
+       if ($displays.Count -eq 0) {
+           throw 'No WMI-controllable display was found.'
+       }
+       foreach ($display in $displays) {
+           $display.WmiSetBrightness(1, $Level)
+       }
    }
    ```
 
@@ -166,7 +193,10 @@ default value. Shyena additionally rejects zero-token invocations of functions t
 - `#`/`<# ... #>` comments remain valid and are ignored by the scanner.
 
 ### Architectural Considerations
-- Need for explicit header directives (e.g. `# shyena:v1`);
+- The `# shyena:v1` header in `assets/default.shyena` is an informational schema marker; the scanner
+  treats it as a comment and does not enforce it, so older header-less files remain valid;
+- The default template explicitly declares both settings, so its behaviour matches `Config::default()`
+  exactly; omission still falls back to those defaults;
 - Migration strategies for legacy configuration files;
 
 ---
@@ -380,9 +410,9 @@ described in §8).
 `ConfigStore::load()` runs in `main.rs` before the hotkey/event loop starts. The file is read with
 the §6 single-pass Win32 reader and parsed immediately. A missing file, I/O failure, or parse error
 is retained as a diagnostic while `Config::default()` (dark theme, suggestions on) keeps the UI
-renderable. The binary never creates the config; `install.ps1` seeds it once (§11). A missing-file
-diagnostic names the exact resolved path (e.g. `C:\Users\<user>\.config\.shyena`) so the location
-to create is unambiguous.
+renderable. The binary never creates the config; `install.ps1` seeds it once by copying
+`assets/default.shyena` (§4). A missing-file diagnostic names the exact resolved path (e.g.
+`C:\Users\<user>\.config\.shyena`) so the location to create is unambiguous.
 
 ### Manual Reload (`:reload`)
 
@@ -431,6 +461,10 @@ restarting Shyena, while the healthy path stays I/O-free.
 - Deterministic installation root: `%LOCALAPPDATA%\Programs\shyena\shyena.exe`;
 - User-level environment integration via User `PATH` and `HKCU` registry hives;
 
+> **TODO**: `install.ps1` is not yet versioned in this repository. The pipeline below is the contract
+> it must implement. In particular, step 4 is what makes a first launch clean: without it the binary
+> reports a fatal missing-file error containing the exact expected path (§10).
+
 ### Process Lifecycle & Installation Pipeline (`install.ps1`)
 1. **Environment Validation**:
    - Verification of 64-bit architecture (`[Environment]::Is64BitOperatingSystem`);
@@ -444,8 +478,10 @@ restarting Shyena, while the healthy path stays I/O-free.
    - Append installation directory to user environment variable `Path`;
 4. **Configuration Seeding**:
    - Primary target: `~/.config/.shyena` (`$env:USERPROFILE\.config\.shyena`);
-   - Writes default theme, `Set-Suggestions 'on'` and initial `@app` / `#ps` bindings only if the file
-  is absent; the launcher itself never seeds, so a missing file at runtime is an error state (§10);
+   - Copy `assets/default.shyena` (the canonical template from §4) to the target path **only when the
+     file does not already exist**, creating the parent `.config` directory if needed; never overwrite
+     an existing config, even one that omits directives or looks incomplete;
+   - The launcher itself never seeds, so a missing file at runtime is an error state (§10);
 5. **Autostart Persistence (HKCU Run Key)**:
    - Registers entry under `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`:
      - Value Name: `"Shyena"`;
@@ -475,5 +511,5 @@ restarting Shyena, while the healthy path stays I/O-free.
 - Unregister the autostart key from `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`;
 - Remove the installation directory (`%LOCALAPPDATA%\Programs\shyena`);
 - Clean user `Path` environment variable;
-- Retain `~/.config/.shyena` by default to preserve user definitions unless explicit `-PurgeConfig`
-  flag is provided;
+- Retain `~/.config/.shyena` (the file seeded from `assets/default.shyena` in §11) by default to
+  preserve user definitions unless an explicit `-PurgeConfig` flag is provided;
