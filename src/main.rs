@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc, thread};
+use std::{cell::RefCell, rc::Rc, sync::Arc, thread, time::Duration};
 use async_channel::{Receiver, Sender};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -70,7 +70,6 @@ fn split_scope(input: &str) -> Option<(Scope, &str)> {
     Some((scope, &trimmed[ch.len_utf8()..]))
 }
 
-#[cfg(target_os = "windows")]
 mod platform {
     use gpui::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -79,6 +78,8 @@ mod platform {
         DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
         DWMWCP_DONOTROUND,
     };
+    use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+    use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::WindowsAndMessaging::{
         SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
@@ -140,17 +141,33 @@ mod platform {
             res.is_ok()
         }
     }
+
+    /// Ask Windows to evict this process's idle pages back to standby. This
+    /// lowers the working set only: committed memory and GPU allocations stay
+    /// resident, and the pages fault back in when the launcher next opens.
+    pub fn trim_working_set() {
+        unsafe {
+            let _ = K32EmptyWorkingSet(GetCurrentProcess());
+        }
+    }
 }
 
-#[cfg(not(target_os = "windows"))]
-mod platform {
-    use gpui::Window;
-
-    pub fn setup_window(_window: &Window) {}
-
-    pub fn make_always_on_top(_window: &Window) -> bool {
-        false
-    }
+/// Trim only while no launcher window is open. The delay keeps the syscall off
+/// the teardown/next-frame path, and the guard cancels a pending trim when the
+/// user reopens the bar within that window.
+fn schedule_trim(
+    cx: &App,
+    active_window: &Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
+    delay: Duration,
+) {
+    let active = active_window.clone();
+    cx.spawn(async move |_| {
+        Timer::after(delay).await;
+        if active.borrow().is_none() {
+            platform::trim_working_set();
+        }
+    })
+    .detach();
 }
 
 #[derive(Clone, Debug)]
@@ -342,8 +359,7 @@ impl SearchBar {
             if active {
                 this.was_active = true;
             } else if this.was_active {
-                *this.active_window.borrow_mut() = None;
-                window.remove_window();
+                this.close(window, cx);
             }
             cx.notify();
         });
@@ -522,6 +538,14 @@ impl SearchBar {
         cx.notify();
     }
 
+    /// Dismiss the launcher and schedule an idle working-set trim. All internal
+    /// close paths share this so the trim cannot be missed or applied twice.
+    fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
+        *self.active_window.borrow_mut() = None;
+        window.remove_window();
+        schedule_trim(&*cx, &self.active_window, Duration::from_millis(200));
+    }
+
     fn handle_key(
         this: &mut Self,
         event: &KeyDownEvent,
@@ -531,8 +555,7 @@ impl SearchBar {
         if let Some(error) = &this.error {
             if event.keystroke.key == "escape" {
                 if error.is_config() {
-                    *this.active_window.borrow_mut() = None;
-                    window.remove_window();
+                    this.close(window, cx);
                 } else {
                     this.dismiss_error(window, cx);
                 }
@@ -542,8 +565,7 @@ impl SearchBar {
 
         match event.keystroke.key.as_str() {
             "escape" => {
-                *this.active_window.borrow_mut() = None;
-                window.remove_window();
+                this.close(window, cx);
             }
             "down" => {
                 if !this.filtered_actions.is_empty() {
@@ -598,7 +620,13 @@ impl SearchBar {
         }
     }
 
-    fn execute_action(&self, action: &CandidateAction, dynamic_args: &[String], window: &mut Window) {
+    fn execute_action(
+        &self,
+        action: &CandidateAction,
+        dynamic_args: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action.kind {
             ActionKind::App => {
                 if let Some(app) = self.config.apps.get(&action.key) {
@@ -631,8 +659,7 @@ impl SearchBar {
             ActionKind::Internal => return,
         }
 
-        *self.active_window.borrow_mut() = None;
-        window.remove_window();
+        self.close(window, cx);
     }
 
     /// Shared entry point for Enter and suggestion clicks so both paths handle
@@ -650,7 +677,7 @@ impl SearchBar {
                 self.run_internal(spec.command, dynamic_args, window, cx);
             }
             ActionKind::App | ActionKind::Ps => {
-                self.execute_action(action, dynamic_args, window);
+                self.execute_action(action, dynamic_args, window, cx);
             }
         }
     }
@@ -674,8 +701,7 @@ impl SearchBar {
                     ReloadOutcome::Updated(config) => {
                         let theme = config.theme;
                         self.apply_config(config, theme, window, cx);
-                        *self.active_window.borrow_mut() = None;
-                        window.remove_window();
+                        self.close(window, cx);
                     }
                     ReloadOutcome::Error(message) => {
                         self.show_config_error(message, window, cx);
@@ -687,8 +713,7 @@ impl SearchBar {
 
     fn execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.query.trim().is_empty() && self.filtered_actions.is_empty() {
-            *self.active_window.borrow_mut() = None;
-            window.remove_window();
+            self.close(window, cx);
             return;
         }
 
@@ -712,7 +737,7 @@ impl SearchBar {
                     kind: ActionKind::App,
                     detail: app.path.display().to_string(),
                 };
-                self.execute_action(&candidate, &args, window);
+                self.execute_action(&candidate, &args, window, cx);
             }
             CommandTarget::Ps { key, args } => {
                 let ps = self.config.ps.get(&key).expect("resolved function exists");
@@ -721,7 +746,7 @@ impl SearchBar {
                     kind: ActionKind::Ps,
                     detail: ps.script.clone(),
                 };
-                self.execute_action(&candidate, &args, window);
+                self.execute_action(&candidate, &args, window, cx);
             }
             CommandTarget::Internal { command, args } => {
                 self.run_internal(command, &args, window, cx);
@@ -1133,6 +1158,10 @@ fn toggle_search_window(
 
     *win_ref = None;
 
+    if was_open {
+        schedule_trim(cx, active_window, Duration::from_millis(200));
+    }
+
     if !was_open {
         drop(win_ref);
         let handle = open_search_window(cx, active_window.clone(), ps_error_tx.clone(), store);
@@ -1204,6 +1233,9 @@ fn main() {
         let hotkey_manager = setup_global_hotkey(tx);
         let active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>> =
             Rc::new(RefCell::new(None));
+
+        // Reclaim startup pages once fonts, renderers and the anchor have settled.
+        schedule_trim(&*cx, &active_window, Duration::from_secs(2));
 
         // Surface asynchronous PowerShell failures in the launcher itself. If
         // the bar was already dismissed, open a fresh window in the error state.

@@ -263,6 +263,11 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
   functions with mandatory parameters rely on PowerShell's own binding error;
 - **Native Process Spawn**: Direct invocation of binary paths with static and dynamic arguments
   via `std::process::Command::spawn()`;
+- **Working-Set Trimming**: `K32EmptyWorkingSet(GetCurrentProcess())` is scheduled once ~2 s after
+  startup and ~200 ms after the launcher is dismissed. Deferring lets GPUI finish teardown before
+  pages are evicted, and the task skips the trim if a new window opened in the meantime. This
+  reduces the resident working set only — committed memory and DirectX allocations are unchanged,
+  and evicted pages are re-faulted on the next open;
 
 ### Pending Considerations
 - Dedicated system tray icon and background daemon lifecycle without persistent console windows;
