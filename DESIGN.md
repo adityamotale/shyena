@@ -58,6 +58,20 @@ Queries follow a clean tokenizer contract:
 - `#<query>`: Scopes search candidates exclusively to PowerShell automation functions;
 - Plain input evaluates across both domains simultaneously;
 
+### Idle State & Candidate Presentation
+- **Startup State**: Search bar opens with an empty query and zero listed candidates;
+  window bounds remain locked to base height (`62.0 px`);
+- **Dynamic Expansion**: Candidate evaluation triggers on input; window resizes dynamically
+  up to `MAX_VISIBLE_ITEMS: 0x06` (`254.0 px`);
+- **Input Placeholder**: `@ for apps, # for commands...` conveys prefix filter syntax;
+
+### Action Tag State Machine
+- **Idle**: Empty tag area when query is empty;
+- **Application (`@app`)**: Clean `[ LAUNCH ]` badge with green accent;
+- **Command / Automation (`#ps`)**: Clean `[ EXEC ]` badge with peach accent;
+- **Resolution Precedence**: Scoped prefix (`@`/`#`) -> selected candidate -> exact
+  dictionary key match -> fallback execution;
+
 ### Candidate Ranking Precedence
 1. Exact match on target key (case-insensitive);
 2. Prefix match on target key (case-insensitive);
