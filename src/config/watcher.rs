@@ -338,6 +338,65 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_theme_reports_parse_error() {
+        let test_dir =
+            std::env::temp_dir().join(format!("shyena_test_theme_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let config_path = test_dir.join(".shyena");
+        std::fs::write(&config_path, "Set-Theme 'mocha'\n").unwrap();
+
+        let (trigger, event_rx) = spawn_config_watcher(config_path).unwrap();
+        trigger.trigger_now();
+
+        match event_rx.recv_blocking().expect("reload event") {
+            ReloadEvent::Error(ReloadError::Parse(parse_err)) => {
+                assert_eq!(
+                    parse_err.message,
+                    "invalid theme: expected 'dark' or 'light'"
+                );
+                assert_eq!(parse_err.line, 1);
+            }
+            other => panic!("expected invalid theme error, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_invalid_then_valid_reload_recovery() {
+        let test_dir =
+            std::env::temp_dir().join(format!("shyena_test_recovery_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let config_path = test_dir.join(".shyena");
+        std::fs::write(&config_path, "Set-Theme 'neon'\n").unwrap();
+
+        let (trigger, event_rx) = spawn_config_watcher(config_path.clone()).unwrap();
+        trigger.trigger_now();
+        match event_rx.recv_blocking().expect("error event") {
+            ReloadEvent::Error(ReloadError::Parse(_)) => {}
+            other => panic!("expected parse error, got: {other:?}"),
+        }
+
+        std::fs::write(
+            &config_path,
+            "Set-Theme 'light'\nRegister-App 'term' @{ Path = 'wt.exe' }\n",
+        )
+        .unwrap();
+        trigger.trigger_now();
+        match event_rx.recv_blocking().expect("updated event") {
+            ReloadEvent::Updated(snapshot) => {
+                assert_eq!(snapshot.theme, Theme::Light);
+                assert_eq!(snapshot.apps[0].name, "term");
+            }
+            other => panic!("expected successful reload, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
     fn test_syntax_error_resilience() {
         let test_dir =
             std::env::temp_dir().join(format!("shyena_test_syntax_{}", std::process::id()));

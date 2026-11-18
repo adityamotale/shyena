@@ -152,23 +152,37 @@ impl<'a> Scanner<'a> {
         Some(b)
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), ParseError> {
         while let Some(b) = self.peek() {
             match b {
                 b' ' | b'\t' | b'\r' | b'\n' => {
                     self.advance();
                 }
                 b'<' if self.peek_next() == Some(b'#') => {
-                    // Block comment <# ... #>
-                    self.advance();
-                    self.advance();
+                    // Block comment <# ... #>. An unclosed comment would
+                    // otherwise silently swallow the remainder of the file.
+                    let start = self.pos;
+                    let line = self.line;
+                    let line_start = self.line_start;
+                    self.advance(); // '<'
+                    self.advance(); // '#'
+                    let mut closed = false;
                     while let Some(cb) = self.peek() {
                         if cb == b'#' && self.peek_next() == Some(b'>') {
                             self.advance();
                             self.advance();
+                            closed = true;
                             break;
                         }
                         self.advance();
+                    }
+                    if !closed {
+                        return Err(self.error_at(
+                            start,
+                            line,
+                            line_start,
+                            "unterminated block comment: missing '#>'",
+                        ));
                     }
                 }
                 b'#' => {
@@ -182,6 +196,7 @@ impl<'a> Scanner<'a> {
                 _ => break,
             }
         }
+        Ok(())
     }
 
     fn read_identifier_or_keyword(&mut self) -> &'a str {
@@ -260,10 +275,10 @@ impl<'a> Scanner<'a> {
                     self.read_string_literal()?;
                 }
                 b'<' if self.peek_next() == Some(b'#') => {
-                    self.skip_whitespace_and_comments();
+                    self.skip_whitespace_and_comments()?;
                 }
                 b'#' => {
-                    self.skip_whitespace_and_comments();
+                    self.skip_whitespace_and_comments()?;
                 }
                 _ => {
                     self.advance();
@@ -281,7 +296,7 @@ impl<'a> Scanner<'a> {
         };
 
         loop {
-            self.skip_whitespace_and_comments();
+            self.skip_whitespace_and_comments()?;
             if self.pos >= self.bytes.len() {
                 break;
             }
@@ -311,7 +326,7 @@ impl<'a> Scanner<'a> {
             }
 
             if kw.eq_ignore_ascii_case("Set-Theme") {
-                self.skip_whitespace_and_comments();
+                self.skip_whitespace_and_comments()?;
                 let val_pos = self.pos;
                 let val_line = self.line;
                 let val_line_start = self.line_start;
@@ -327,10 +342,10 @@ impl<'a> Scanner<'a> {
                 };
                 ast.theme = Some(theme);
             } else if kw.eq_ignore_ascii_case("Register-App") {
-                self.skip_whitespace_and_comments();
+                self.skip_whitespace_and_comments()?;
                 let name = self.read_string_literal()?;
 
-                self.skip_whitespace_and_comments();
+                self.skip_whitespace_and_comments()?;
                 if self.peek() == Some(b'@') && self.peek_next() == Some(b'{') {
                     self.advance(); // '@'
                     let block_start = self.pos; // start at '{' for span compatibility
@@ -347,7 +362,7 @@ impl<'a> Scanner<'a> {
                     return Err(self.make_error("expected '@{' after Register-App name"));
                 }
             } else if kw.eq_ignore_ascii_case("function") {
-                self.skip_whitespace_and_comments();
+                self.skip_whitespace_and_comments()?;
                 let name_pos = self.pos;
                 let name_line = self.line;
                 let name_line_start = self.line_start;
@@ -361,7 +376,7 @@ impl<'a> Scanner<'a> {
                     ));
                 }
 
-                self.skip_whitespace_and_comments();
+                self.skip_whitespace_and_comments()?;
                 let block_span = self.scan_balanced_block()?;
                 ast.functions.push(FunctionDef { name, block_span });
             } else {
@@ -384,7 +399,7 @@ impl<'a> Scanner<'a> {
         let mut args: Option<Vec<String>> = None;
 
         loop {
-            self.skip_whitespace_and_comments();
+            self.skip_whitespace_and_comments()?;
             let Some(b) = self.peek() else {
                 return Err(self.make_error("unterminated hashtable: missing '}'"));
             };
@@ -425,12 +440,12 @@ impl<'a> Scanner<'a> {
                 ));
             }
 
-            self.skip_whitespace_and_comments();
+            self.skip_whitespace_and_comments()?;
             if self.peek() != Some(b'=') {
                 return Err(self.make_error("expected '=' after key"));
             }
             self.advance(); // '='
-            self.skip_whitespace_and_comments();
+            self.skip_whitespace_and_comments()?;
 
             if is_path {
                 let value = self.read_hashtable_string_value()?;
@@ -484,7 +499,7 @@ impl<'a> Scanner<'a> {
             self.advance(); // '('
             let mut values = Vec::new();
             loop {
-                self.skip_whitespace_and_comments();
+                self.skip_whitespace_and_comments()?;
                 let Some(c) = self.peek() else {
                     return Err(self.make_error("unterminated Args array: missing ')'"));
                 };
@@ -881,5 +896,67 @@ function complex_fn {
     fn test_set_theme_requires_string_literal() {
         let err = Scanner::new("Set-Theme dark").parse().unwrap_err();
         assert_eq!(err.message, "expected string literal");
+    }
+
+    #[test]
+    fn test_invalid_theme_values_are_rejected() {
+        for source in [
+            "Set-Theme 'mocha'",
+            "set-theme \"BLUE\"",
+            "Set-Theme ''",
+            "Set-Theme 'dark '",
+            "Set-Theme 'light-dark'",
+        ] {
+            let err = Scanner::new(source).parse().unwrap_err();
+            assert_eq!(
+                err.message,
+                "invalid theme: expected 'dark' or 'light'",
+                "source: {source}"
+            );
+            assert_eq!(err.line, 1);
+        }
+
+        let light = Scanner::new("Set-Theme \"LIGHT\"").parse().unwrap();
+        assert_eq!(light.theme, Some(Theme::Light));
+    }
+
+    #[test]
+    fn test_unterminated_block_comment_is_an_error() {
+        let err = Scanner::new("<# never closed\nRegister-App 'a' @{}")
+            .parse()
+            .unwrap_err();
+        assert_eq!(err.message, "unterminated block comment: missing '#>'");
+        assert_eq!(err.line, 1);
+        assert_eq!(err.col, 1);
+    }
+
+    #[test]
+    fn test_non_directive_tokens_and_characters_are_rejected() {
+        // '#' alone is a valid line comment, so it is excluded here.
+        for source in ["app", "ps", "config", "@", ";", "$", "=x", "1bad"] {
+            let err = Scanner::new(source).parse().unwrap_err();
+            assert!(
+                err.message.contains("unexpected"),
+                "source: {source}, message: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn test_trailing_junk_after_directives_is_an_error() {
+        for source in [
+            "Set-Theme 'dark' app",
+            "Register-App 'a' @{} ps",
+            "function f {} config",
+            "Register-App 'a' @{ Path = 'a.exe'; Args = @() }",
+        ] {
+            let err = Scanner::new(source).parse().unwrap_err();
+            assert!(
+                err.message.contains("unexpected"),
+                "source: {source}, message: {}",
+                err.message
+            );
+        }
     }
 }

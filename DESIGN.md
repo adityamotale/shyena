@@ -73,7 +73,8 @@ Queries follow a clean tokenizer contract:
 - **Resolution Precedence**: Scoped prefix (`@`/`#`) -> selected candidate -> exact
   dictionary key match -> fallback execution;
 - **Error**: A failed command replaces the bar in place with a one-line diagnostic; `[Esc]`
-  dismisses it and returns to an empty `Idle` bar (see §9);
+  dismisses it and returns to an empty `Idle` bar (see §9). Configuration errors are fatal
+  for the session: `[Esc]` closes the launcher instead of revealing a search bar;
 
 ### Candidate Ranking Precedence
 1. Exact match on target key (case-insensitive);
@@ -138,11 +139,18 @@ default value. Shyena additionally rejects zero-token invocations of functions t
 
 ## 5. Schema Evolution & Backward Compatibility
 
-*Status: Not Yet Decided*
+*Status: Strict validation implemented*
+
+### Implemented Rules
+- Unknown top-level tokens (`app`, `ps`, `config`, etc.) and stray characters (`@`, `;`, `$`, `=`,
+  digit-leading identifiers) are rejected with a line/column diagnostic;
+- `Set-Theme` accepts only quoted `'dark'` / `'light'` values (case-insensitive); any other value
+  produces `invalid theme: expected 'dark' or 'light'`;
+- Unterminated block comments (`<# ...`) and trailing junk after a directive are parse errors;
+- `#`/`<# ... #>` comments remain valid and are ignored by the scanner.
 
 ### Architectural Considerations
 - Need for explicit header directives (e.g. `# shyena:v1`);
-- Graceful handling of unknown configuration directives;
 - Migration strategies for legacy configuration files;
 
 ---
@@ -263,14 +271,17 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 
 ## 9. Error Diagnostics & Visual Reporting
 
-*Status: Implemented (execution errors)*
+*Status: Implemented (execution and configuration errors)*
 
 ### Error State Machine
 - **Idle**: Normal search bar with query, action tag, and candidate list;
 - **Error**: A failed command replaces the bar in place with a red-framed `shyena::error` panel
   showing one condensed message line; input is ignored while this state is active;
-- **Dismissal**: `[Esc]` clears the error and returns to an empty `Idle` bar in the same window,
-  ready for a retry;
+- **Config Error**: A config load/reload failure shows a `shyena::config_error` panel marked
+  `[ ESC: close ]`. It is non-dismissible: `[Esc]` removes the window entirely so the search bar
+  can never reappear while the configuration is invalid;
+- **Dismissal**: `[Esc]` on a runtime error clears it and returns to an empty `Idle` bar in the same
+  window, ready for a retry;
 - **Late Errors**: If the launcher was already dismissed when the worker reports the failure, a
   new window is opened directly in the `Error` state;
 
@@ -280,9 +291,9 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
 - **PowerShell failures**: Non-zero exit status / `stderr` (including Windows PowerShell 5.1
   CLIXML records) is reduced to its first meaningful line, whitespace-collapsed, truncated to
   120 characters, and prefixed with the command name;
-- **Configuration errors**: `Config::load` parse failures currently log to `stderr` and fall back
-  to an empty config; the §10 watcher emits `ReloadEvent::Error`, but routing it through this
-  overlay is still pending;
+- **Configuration errors**: `Config::load_with_diagnostics()` parse/IO failures open the launcher
+  directly in the fatal config error state; the §10 watcher routes `ReloadEvent::Error` into the
+  same overlay, and a later `ReloadEvent::Updated` clears it;
 
 ---
 
@@ -321,16 +332,23 @@ coalesced using a 75 ms trailing-edge debouncer on a dedicated background thread
 ### Reserved `#config-reload` Command
 
 A thread-safe `ReloadTrigger` handle and reserved action string (`RESERVED_RELOAD_CMD = "config-reload"`)
-allow instant manual reloads without awaiting timer expiration.
+allow instant manual reloads without awaiting timer expiration. The watcher is started once in
+`main.rs`; `#config-reload` (or bare `config-reload`) calls `ReloadTrigger::trigger_now()` and closes
+the launcher, letting the resulting `ReloadEvent` either show the fatal config error or keep the
+launcher closed. Typing an unregistered command and pressing Enter now produces an in-app error
+instead of a silent stdout message.
 
 ### Implementation Details
-- **Module Location**: `src/config/watcher.rs`, exposed via `src/config/mod.rs`;
+- **Module Location**: `src/config/watcher.rs`, exposed via `src/config/mod.rs`; started and consumed
+  in `src/main.rs`;
 - **Core Types**:
   - `ConfigSnapshot`: owned snapshot containing `apps: Vec<OwnedAppDef>` and `functions: Vec<OwnedFunctionDef>`;
   - `ReloadError`: encapsulates I/O errors and zero-copy `ParseError` diagnostics;
   - `ReloadEvent`: enum of `Updated(ConfigSnapshot)` and `Error(ReloadError)`;
   - `ReloadTrigger`: `mpsc::Sender<WatchSignal>` wrapper for instantaneous manual triggers;
-  - `spawn_config_watcher()`: spawns watcher and debouncer threads, returning trigger and event receiver.
+  - `spawn_config_watcher()`: spawns watcher and debouncer threads, returning trigger and event receiver;
+- **UI Integration**: a GPUI task consumes `ReloadEvent`; `Updated` swaps the active bar's config/theme
+  and clears a config error, `Error` opens or reuses the launcher in the fatal config error state.
 
 ---
 

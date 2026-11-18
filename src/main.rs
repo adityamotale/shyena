@@ -9,6 +9,7 @@ use gpui::*;
 mod config;
 mod exec;
 mod theme;
+use config::{ReloadTrigger, RESERVED_RELOAD_CMD};
 use theme::Theme;
 
 const WIN_WIDTH: f32 = 660.0;
@@ -124,6 +125,111 @@ pub struct PsError {
     pub message: String,
 }
 
+/// Runtime failures are dismissible with [Esc]; config failures are fatal for
+/// the current launcher session and close the window on [Esc] instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ErrorState {
+    Runtime(String),
+    Config(String),
+}
+
+impl ErrorState {
+    fn message(&self) -> &str {
+        match self {
+            Self::Runtime(message) | Self::Config(message) => message,
+        }
+    }
+
+    fn is_config(&self) -> bool {
+        matches!(self, Self::Config(_))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CommandTarget {
+    App { key: String, args: Vec<String> },
+    Ps { key: String, args: Vec<String> },
+    Reload,
+}
+
+fn candidate_target(candidate: &CandidateAction, args: Vec<String>) -> CommandTarget {
+    match candidate.kind {
+        ActionKind::App => CommandTarget::App {
+            key: candidate.key.clone(),
+            args,
+        },
+        ActionKind::Ps => CommandTarget::Ps {
+            key: candidate.key.clone(),
+            args,
+        },
+    }
+}
+
+/// Resolves a committed query into an executable target. Candidate fallback
+/// preserves the existing "type a prefix, press Enter" flow; an unmatched
+/// token becomes an explicit error instead of a silent stdout print.
+fn resolve_command(
+    config: &config::Config,
+    query: &str,
+    selected: Option<&CandidateAction>,
+) -> Result<CommandTarget, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return selected
+            .map(|candidate| candidate_target(candidate, Vec::new()))
+            .ok_or_else(|| "empty command".to_string());
+    }
+
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let first = tokens[0];
+    let (scope, key, rest): (Option<&str>, &str, &[&str]) = if first == "@" || first == "#" {
+        if tokens.len() < 0x02 {
+            return selected
+                .map(|candidate| candidate_target(candidate, Vec::new()))
+                .ok_or_else(|| "expected command after prefix".to_string());
+        }
+        (Some(first), tokens[0x01], &tokens[0x02..])
+    } else if let Some(stripped) = first.strip_prefix('@') {
+        (Some("@"), stripped, &tokens[0x01..])
+    } else if let Some(stripped) = first.strip_prefix('#') {
+        (Some("#"), stripped, &tokens[0x01..])
+    } else {
+        (None, first, &tokens[0x01..])
+    };
+
+    if key.is_empty() {
+        return Err("expected command name".to_string());
+    }
+
+    if key.eq_ignore_ascii_case(RESERVED_RELOAD_CMD) && scope != Some("@") {
+        return Ok(CommandTarget::Reload);
+    }
+
+    let args = rest.iter().map(|token| token.to_string()).collect::<Vec<_>>();
+
+    if scope != Some("#") && config.apps.contains_key(key) {
+        return Ok(CommandTarget::App {
+            key: key.to_string(),
+            args,
+        });
+    }
+
+    if scope != Some("@") {
+        if config.ps.contains_key(key) {
+            return Ok(CommandTarget::Ps {
+                key: key.to_string(),
+                args,
+            });
+        }
+    }
+
+    if let Some(candidate) = selected {
+        return Ok(candidate_target(candidate, args));
+    }
+
+    Err(format!("unknown command '{key}'"))
+}
+
 fn spawn_powershell_worker(rx: Receiver<PsTask>, error_tx: Sender<PsError>) {
     thread::spawn(move || {
         while let Ok(task) = rx.recv_blocking() {
@@ -159,10 +265,11 @@ struct SearchBar {
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     config: Arc<config::Config>,
     ps_sender: Sender<PsTask>,
+    reload_trigger: ReloadTrigger,
     theme: Theme,
     selected_index: usize,
     filtered_actions: Vec<CandidateAction>,
-    error: Option<String>,
+    error: Option<ErrorState>,
 }
 
 impl SearchBar {
@@ -172,6 +279,7 @@ impl SearchBar {
         active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
         config: Arc<config::Config>,
         ps_sender: Sender<PsTask>,
+        reload_trigger: ReloadTrigger,
         theme: Theme,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -199,6 +307,7 @@ impl SearchBar {
             active_window,
             config,
             ps_sender,
+            reload_trigger,
             theme,
             selected_index: 0,
             filtered_actions: Vec::new(),
@@ -311,8 +420,13 @@ impl SearchBar {
         }
     }
 
-    fn show_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.error = Some(message);
+    fn set_error(
+        &mut self,
+        error: ErrorState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = Some(error);
         self.query.clear();
         self.filtered_actions.clear();
         self.selected_index = 0;
@@ -321,9 +435,38 @@ impl SearchBar {
         cx.notify();
     }
 
+    fn show_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_error(ErrorState::Runtime(message), window, cx);
+    }
+
+    /// Config errors are fatal: [Esc] must close the launcher instead of
+    /// returning to an empty search bar.
+    fn show_config_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_error(ErrorState::Config(message), window, cx);
+    }
+
     fn dismiss_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         self.query.clear();
+        self.update_filtered_actions(window);
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    /// A successful hot reload replaces the snapshot and clears a config error.
+    fn apply_config(
+        &mut self,
+        config: Arc<config::Config>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.config = config;
+        self.theme = theme;
+        if self.error.as_ref().is_some_and(ErrorState::is_config) {
+            self.error = None;
+            self.query.clear();
+        }
         self.update_filtered_actions(window);
         self.focus_handle.focus(window);
         cx.notify();
@@ -335,9 +478,14 @@ impl SearchBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if this.error.is_some() {
+        if let Some(error) = &this.error {
             if event.keystroke.key == "escape" {
-                this.dismiss_error(window, cx);
+                if error.is_config() {
+                    *this.active_window.borrow_mut() = None;
+                    window.remove_window();
+                } else {
+                    this.dismiss_error(window, cx);
+                }
             }
             return;
         }
@@ -381,7 +529,7 @@ impl SearchBar {
                 }
             }
             "enter" => {
-                this.execute(window);
+                this.execute(window, cx);
             }
             "backspace" => {
                 this.query.pop();
@@ -433,56 +581,50 @@ impl SearchBar {
         window.remove_window();
     }
 
-    fn execute(&self, window: &mut Window) {
-        let trimmed = self.query.trim();
-        if !trimmed.is_empty() {
-            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            let (clean_key, dynamic_args) = if (tokens[0x00] == "@" || tokens[0x00] == "#")
-                && tokens.len() > 0x01
-            {
-                (
-                    tokens[0x01],
-                    tokens[0x02..].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                )
-            } else {
-                let raw_key = tokens[0x00];
-                let clean = raw_key
-                    .strip_prefix('@')
-                    .or_else(|| raw_key.strip_prefix('#'))
-                    .unwrap_or(raw_key);
-                let args = tokens[0x01..].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-                (clean, args)
-            };
-
-            if let Some(app) = self.config.apps.get(clean_key) {
-                let candidate = CandidateAction {
-                    key: clean_key.to_string(),
-                    kind: ActionKind::App,
-                    detail: app.path.display().to_string(),
-                };
-                self.execute_action(&candidate, &dynamic_args, window);
-                return;
-            } else if let Some(ps) = self.config.ps.get(clean_key) {
-                let candidate = CandidateAction {
-                    key: clean_key.to_string(),
-                    kind: ActionKind::Ps,
-                    detail: ps.script.clone(),
-                };
-                self.execute_action(&candidate, &dynamic_args, window);
-                return;
-            } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
-                self.execute_action(selected, &dynamic_args, window);
-                return;
-            } else {
-                println!("Terminal command executed: {}", trimmed);
-            }
-        } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
-            self.execute_action(selected, &[], window);
+    fn execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query.trim().is_empty() && self.filtered_actions.is_empty() {
+            *self.active_window.borrow_mut() = None;
+            window.remove_window();
             return;
         }
 
-        *self.active_window.borrow_mut() = None;
-        window.remove_window();
+        let target = match resolve_command(
+            &self.config,
+            &self.query,
+            self.filtered_actions.get(self.selected_index),
+        ) {
+            Ok(target) => target,
+            Err(message) => {
+                self.show_error(message, window, cx);
+                return;
+            }
+        };
+
+        match target {
+            CommandTarget::App { key, args } => {
+                let app = self.config.apps.get(&key).expect("resolved app exists");
+                let candidate = CandidateAction {
+                    key,
+                    kind: ActionKind::App,
+                    detail: app.path.display().to_string(),
+                };
+                self.execute_action(&candidate, &args, window);
+            }
+            CommandTarget::Ps { key, args } => {
+                let ps = self.config.ps.get(&key).expect("resolved function exists");
+                let candidate = CandidateAction {
+                    key,
+                    kind: ActionKind::Ps,
+                    detail: ps.script.clone(),
+                };
+                self.execute_action(&candidate, &args, window);
+            }
+            CommandTarget::Reload => {
+                self.reload_trigger.trigger_now();
+                *self.active_window.borrow_mut() = None;
+                window.remove_window();
+            }
+        }
     }
 }
 
@@ -531,7 +673,19 @@ impl Render for SearchBar {
 
         // Error state replaces the search bar entirely; [Esc] returns to an
         // empty bar in the same window.
-        if let Some(message) = self.error.clone() {
+        if let Some(error) = &self.error {
+            let message = error.message().to_string();
+            let label = if error.is_config() {
+                "shyena::config_error"
+            } else {
+                "shyena::error"
+            };
+            let esc_hint = if error.is_config() {
+                "[ ESC: close ]"
+            } else {
+                "[ ESC: continue ]"
+            };
+
             return root
                 .child(
                     div()
@@ -550,7 +704,7 @@ impl Render for SearchBar {
                                 .items_center()
                                 .gap(px(4.0))
                                 .child(div().text_color(theme.red()).child("┌─["))
-                                .child(div().text_color(theme.red()).child("shyena::error"))
+                                .child(div().text_color(theme.red()).child(label.to_string()))
                                 .child(div().text_color(theme.red()).child("]")),
                         )
                         .child(
@@ -561,7 +715,7 @@ impl Render for SearchBar {
                                 .child(
                                     div()
                                         .text_color(theme.subtext0())
-                                        .child("[ ESC: continue ]"),
+                                        .child(esc_hint.to_string()),
                                 )
                                 .child(div().text_color(theme.red()).child("─┐")),
                         ),
@@ -793,6 +947,7 @@ fn open_search_window(
     cx: &mut App,
     active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     ps_sender: Sender<PsTask>,
+    reload_trigger: ReloadTrigger,
 ) -> WindowHandle<SearchBar> {
     let display = cx.displays().into_iter().next();
     let win_height = px(BAR_HEIGHT);
@@ -829,18 +984,29 @@ fn open_search_window(
 
     cx.activate(true);
     let active_ref = active_window.clone();
+    let reload_ref = reload_trigger.clone();
     let (cfg, diagnostic) = config::Config::load_with_diagnostics();
     let config = Arc::new(cfg);
     let theme = config.theme;
     let handle = cx
         .open_window(options, |window, cx| {
-            cx.new(|cx| SearchBar::new(window, cx, active_ref, config, ps_sender, theme))
+            cx.new(|cx| {
+                SearchBar::new(
+                    window,
+                    cx,
+                    active_ref,
+                    config,
+                    ps_sender,
+                    reload_ref,
+                    theme,
+                )
+            })
         })
         .unwrap();
 
     if let Some(message) = diagnostic {
         let _ = handle.update(cx, |bar, window, cx| {
-            bar.show_error(message, window, cx);
+            bar.show_config_error(message, window, cx);
         });
     }
 
@@ -851,6 +1017,7 @@ fn toggle_search_window(
     cx: &mut App,
     active_window: &Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     ps_sender: &Sender<PsTask>,
+    reload_trigger: ReloadTrigger,
 ) {
     let mut win_ref = active_window.borrow_mut();
     let mut was_open = false;
@@ -867,7 +1034,12 @@ fn toggle_search_window(
 
     if !was_open {
         drop(win_ref);
-        let handle = open_search_window(cx, active_window.clone(), ps_sender.clone());
+        let handle = open_search_window(
+            cx,
+            active_window.clone(),
+            ps_sender.clone(),
+            reload_trigger,
+        );
         *active_window.borrow_mut() = Some(handle);
     }
 }
@@ -931,6 +1103,15 @@ fn main() {
             async_channel::unbounded();
         spawn_powershell_worker(ps_rx, ps_err_tx);
 
+        // The watcher monitors the parent directory, so make sure it exists
+        // before the Win32 listener starts (a first launch may not have it yet).
+        let config_path = config::Config::config_path();
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let (reload_trigger, reload_rx) =
+            config::spawn_config_watcher(config_path).expect("Failed to start config watcher");
+
         // Hotkey manager must stay alive for the lifetime of the application
         let hotkey_manager = setup_global_hotkey(tx);
         let active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>> =
@@ -940,18 +1121,24 @@ fn main() {
         // the bar was already dismissed, open a fresh window in the error state.
         let error_window = active_window.clone();
         let error_ps_sender = ps_tx.clone();
+        let error_reload_trigger = reload_trigger.clone();
         cx.spawn(async move |cx| {
             while let Ok(err) = ps_err_rx.recv().await {
                 let active = error_window.clone();
                 let ps_sender = error_ps_sender.clone();
+                let trigger = error_reload_trigger.clone();
                 let message = err.message;
                 let _ = cx.update(move |cx| {
                     let handle = active.borrow().as_ref().cloned();
                     let handle = match handle {
                         Some(handle) => handle,
                         None => {
-                            let handle =
-                                open_search_window(cx, active.clone(), ps_sender.clone());
+                            let handle = open_search_window(
+                                cx,
+                                active.clone(),
+                                ps_sender.clone(),
+                                trigger.clone(),
+                            );
                             *active.borrow_mut() = Some(handle.clone());
                             handle
                         }
@@ -963,7 +1150,8 @@ fn main() {
                         })
                         .is_err()
                     {
-                        let handle = open_search_window(cx, active.clone(), ps_sender);
+                        let handle =
+                            open_search_window(cx, active.clone(), ps_sender, trigger);
                         *active.borrow_mut() = Some(handle.clone());
                         let _ = handle.update(cx, |bar, window, cx| {
                             bar.show_error(message, window, cx);
@@ -974,16 +1162,86 @@ fn main() {
         })
         .detach();
 
+        // Live config changes: valid snapshots refresh the open bar, while any
+        // I/O or parse failure becomes a fatal config error panel.
+        let reload_event_window = active_window.clone();
+        let reload_event_ps_sender = ps_tx.clone();
+        let reload_event_trigger = reload_trigger.clone();
+        let reload_keepalive = reload_trigger.clone();
+        cx.spawn(async move |cx| {
+            let _trigger_keepalive = reload_keepalive;
+            while let Ok(event) = reload_rx.recv().await {
+                let active = reload_event_window.clone();
+                let ps_sender = reload_event_ps_sender.clone();
+                let trigger = reload_event_trigger.clone();
+                let _ = cx.update(move |cx| match event {
+                    config::ReloadEvent::Updated(snapshot) => {
+                        let cfg = Arc::new(config::Config::from(snapshot));
+                        let theme = cfg.theme;
+                        if let Some(handle) = active.borrow().as_ref().cloned() {
+                            if handle
+                                .update(cx, |bar, window, cx| {
+                                    bar.apply_config(cfg, theme, window, cx);
+                                })
+                                .is_err()
+                            {
+                                *active.borrow_mut() = None;
+                            }
+                        }
+                    }
+                    config::ReloadEvent::Error(err) => {
+                        let message = match err {
+                            config::ReloadError::Parse(parse_err) => parse_err.to_diagnostic(),
+                            config::ReloadError::Io(io_err) => format!(
+                                "~/.config/.shyena:1:1: error: failed to read config: {io_err}"
+                            ),
+                        };
+                        let handle = active.borrow().as_ref().cloned();
+                        let handle = match handle {
+                            Some(handle) => handle,
+                            None => {
+                                let handle = open_search_window(
+                                    cx,
+                                    active.clone(),
+                                    ps_sender.clone(),
+                                    trigger.clone(),
+                                );
+                                *active.borrow_mut() = Some(handle.clone());
+                                handle
+                            }
+                        };
+
+                        if handle
+                            .update(cx, |bar, window, cx| {
+                                bar.show_config_error(message.clone(), window, cx);
+                            })
+                            .is_err()
+                        {
+                            let handle =
+                                open_search_window(cx, active.clone(), ps_sender, trigger);
+                            *active.borrow_mut() = Some(handle.clone());
+                            let _ = handle.update(cx, |bar, window, cx| {
+                                bar.show_config_error(message, window, cx);
+                            });
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+
         let active_window_clone = active_window.clone();
         let ps_tx_clone = ps_tx.clone();
+        let hotkey_reload_trigger = reload_trigger.clone();
         cx.spawn(async move |cx| {
             // Keep hotkey_manager in the async task scope so it is never dropped
             let _manager = hotkey_manager;
             while let Ok(()) = rx.recv().await {
                 let active = active_window_clone.clone();
                 let ps_sender = ps_tx_clone.clone();
+                let trigger = hotkey_reload_trigger.clone();
                 let _ = cx.update(move |cx| {
-                    toggle_search_window(cx, &active, &ps_sender);
+                    toggle_search_window(cx, &active, &ps_sender, trigger);
                 });
             }
         })
@@ -993,8 +1251,93 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{PsError, PsTask, spawn_powershell_worker};
+    use super::{
+        ActionKind, CandidateAction, CommandTarget, PsError, PsTask, resolve_command,
+        spawn_powershell_worker,
+    };
+    use crate::config::{AppAction, Config, PsAction};
     use async_channel::{Receiver, Sender};
+    use std::path::PathBuf;
+
+    fn test_config() -> Config {
+        let mut config = Config::default();
+        config.apps.insert(
+            "app".to_string(),
+            AppAction {
+                path: PathBuf::from("app.exe"),
+                args: Vec::new(),
+            },
+        );
+        config.ps.insert(
+            "ps".to_string(),
+            PsAction {
+                script: "ps".to_string(),
+                body: "{}".to_string(),
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn test_resolve_command_accepts_known_targets_and_reload() {
+        let config = test_config();
+        assert_eq!(
+            resolve_command(&config, "@app arg", None),
+            Ok(CommandTarget::App {
+                key: "app".to_string(),
+                args: vec!["arg".to_string()],
+            })
+        );
+        assert_eq!(
+            resolve_command(&config, "#ps 1", None),
+            Ok(CommandTarget::Ps {
+                key: "ps".to_string(),
+                args: vec!["1".to_string()],
+            })
+        );
+        assert_eq!(
+            resolve_command(&config, "#config-reload", None),
+            Ok(CommandTarget::Reload)
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_rejects_unknown_and_misscoped_tokens() {
+        let config = test_config();
+        assert_eq!(
+            resolve_command(&config, "unknown", None),
+            Err("unknown command 'unknown'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "@ps", None),
+            Err("unknown command 'ps'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "#app", None),
+            Err("unknown command 'app'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "@", None),
+            Err("expected command after prefix".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_falls_back_to_selected_candidate() {
+        let config = test_config();
+        let candidate = CandidateAction {
+            key: "ps".to_string(),
+            kind: ActionKind::Ps,
+            detail: String::new(),
+        };
+        assert_eq!(
+            resolve_command(&config, "p", Some(&candidate)),
+            Ok(CommandTarget::Ps {
+                key: "ps".to_string(),
+                args: Vec::new(),
+            })
+        );
+    }
 
     #[test]
     fn test_worker_reports_missing_argument_to_ui_channel() {
