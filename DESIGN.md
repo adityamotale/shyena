@@ -42,29 +42,35 @@ It replaces shell alias scripts, hotkey daemons, and traditional Windows search 
 
 ## 3. Search Bar Interface & State Machine
 
-### Dual-Token Syntax Contract
+### Query Token Contract
 Queries follow a clean tokenizer contract:
-- **First Token (`tokens[0]`)**: Resolves the action key;
-- **Subsequent Tokens (`tokens[1..]`)**: Forwarded dynamically to the target command or script;
+- **Optional Scope Prefix**: A single leading `@`, `#`, or `:` narrows candidate resolution; both
+  the compact (`@app`) and spaced (`@ app`) forms are accepted;
+- **First Token (`tokens[0]`)**: Resolves the action key after the scope prefix is stripped;
+- **Subsequent Tokens (`tokens[1..]`)**: Forwarded dynamically to the target command, script, or
+  internal command;
 
 ### Prefix Routing & Scoping
 - `@<query>`: Scopes search candidates exclusively to registered applications;
 - `#<query>`: Scopes search candidates exclusively to PowerShell automation functions;
-- Plain input evaluates across both domains simultaneously;
+- `:<query>`: Scopes search candidates exclusively to built-in Shyena commands (e.g. `:reload`);
+- Plain input evaluates across both apps and PowerShell functions simultaneously; internal commands
+  stay behind `:` so they never clutter normal search results;
 
 ### Idle State & Candidate Presentation
 - **Startup State**: Search bar opens with an empty query and zero listed candidates;
   window bounds remain locked to base height (`62.0 px`);
 - **Dynamic Expansion**: Candidate evaluation triggers on input; window resizes dynamically
   up to `MAX_VISIBLE_ITEMS: 0x06` (`254.0 px`);
-- **Input Placeholder**: `@ for apps, # for commands...` conveys prefix filter syntax;
+- **Input Placeholder**: `@ apps, # commands, : system...` conveys the three scope prefixes;
 
 ### Action Tag State Machine
 - **Idle**: Empty tag area when query is empty;
 - **Application (`@app`)**: Clean `[ LAUNCH ]` badge with green accent;
 - **Command / Automation (`#ps`)**: Clean `[ EXEC ]` badge with peach accent;
-- **Resolution Precedence**: Scoped prefix (`@`/`#`) -> selected candidate -> exact
-  dictionary key match -> fallback execution;
+- **Internal Command (`:reload`)**: Clean `[ SYSTEM ]` badge with blue accent;
+- **Resolution Precedence**: Scoped prefix (`@`/`#`/`:`) -> exact key/command match -> selected
+  candidate -> explicit error;
 - **Error**: A failed command replaces the bar in place with a one-line diagnostic; `[Esc]`
   dismisses it and returns to an empty `Idle` bar (see §9). Configuration errors are fatal
   for the session: `[Esc]` closes the launcher instead of revealing a search bar;
@@ -74,7 +80,7 @@ Queries follow a clean tokenizer contract:
 2. Prefix match on target key (case-insensitive);
 3. Lexicographical ascending order;
 
-### Dual-Engine Execution Pipeline
+### Execution Pipeline
 - **Native Binary Fast-Path (`@app`)**:
   - Spawned directly via `std::process::Command` / Win32 `CreateProcessW`;
   - Sub-5ms invocation latency; static flags applied without dynamic token expansion;
@@ -82,6 +88,9 @@ Queries follow a clean tokenizer contract:
   - Dispatched to worker threads via an `async-channel` queue;
   - Non-blocking execution preserves 60+ FPS UI interaction;
   - Forwards CLI parameters directly to script functions;
+- **Built-in Command Path (`:cmd`)**:
+  - Dispatched in-process by the `src/commands.rs` registry;
+  - Never spawns a process or PowerShell worker; current command is `:reload`;
 
 ---
 
@@ -156,7 +165,7 @@ default value. Shyena additionally rejects zero-token invocations of functions t
 
 The configuration pipeline targets `~/.config/.shyena`,
 housing native PowerShell definitions (`Register-App` and `function <name>`);
-sub-millisecond cold start and `#config-reload` latency are primary design objectives
+sub-millisecond cold start and `:reload` latency are primary design objectives
 
 Empirical benchmarks across 5 Win32 file-reading strategies on Windows 11 (NT 10.0.26200,
 Intel i5-10300H) yielded the following latency characteristics across 4 KB, 32 KB, and 256 KB:
@@ -285,7 +294,7 @@ allowing the GPUI UI to render an inline red diagnostic banner without crashing 
   CLIXML records) is reduced to its first meaningful line, whitespace-collapsed, truncated to
   120 characters, and prefixed with the command name;
 - **Configuration errors**: `ConfigStore::load()` parse/IO failures are cached as a diagnostic and
-  shown the first time the launcher opens; `#config-reload` failures render the same overlay, and a
+  shown the first time the launcher opens; `:reload` failures render the same overlay, and a
   successful reload clears it;
 
 ---
@@ -308,13 +317,14 @@ is absent, the default configuration is written and cached; otherwise the file i
 single-pass Win32 reader and parsed immediately. Parse/I/O failures are retained as a diagnostic
 while an empty fallback config keeps the UI renderable.
 
-### Manual Reload (`#config-reload`)
+### Manual Reload (`:reload`)
 
-The reserved action string (`RESERVED_RELOAD_CMD = "config-reload"`) resolves before any config
-lookup, so the command remains reachable even when the cached config is empty. Invoking it
-synchronously re-reads and re-parses the file on the UI thread (~200 µs, §6), swaps the cached
-`Arc<Config>` and theme, and closes the launcher. A failure leaves the last known-good config active
-and renders the fatal config error panel in place.
+Built-in commands live in the `:` namespace and are registered in `src/commands.rs`. `:reload`
+resolves before any config lookup, so it remains reachable even when the cached config is empty.
+Invoking it synchronously re-reads and re-parses the file on the UI thread (~200 µs, §6), swaps the
+cached `Arc<Config>` and theme, and closes the launcher. A failure leaves the last known-good config
+active and renders the fatal config error panel in place. Command-specific arguments are rejected
+(`:reload` takes none); future commands may accept them without parser changes.
 
 ### Failure Recovery
 
@@ -325,18 +335,21 @@ path stays I/O-free.
 
 ### Trade-offs
 
-- External edits are not observed automatically; apply them via `#config-reload` (or by repairing an
+- External edits are not observed automatically; apply them via `:reload` (or by repairing an
   invalid file and reopening the launcher).
 - Manual reload is naturally compatible with atomic editor saves, since the file is reopened by path
   rather than watched through a handle.
 
 ### Implementation Details
-- **Module Location**: `src/config/store.rs`, re-exported via `src/config/mod.rs`;
+- **Module Location**: `src/config/store.rs` (cache) and `src/commands.rs` (built-in command
+  registry);
 - **Core Types**:
   - `ConfigStore`: cached `Arc<Config>`, reusable `ConfigReader`, and the last-load diagnostic;
   - `ReloadOutcome`: `Updated(Arc<Config>)` or `Error(String)`;
-- **UI Integration**: `SearchBar` holds an `Rc<RefCell<ConfigStore>>`; `#config-reload` calls
-  `reload()` and either applies the new config or shows the fatal error panel.
+  - `CommandSpec` / `InternalCommand`: static metadata and dispatch identity for `:` commands;
+- **UI Integration**: `SearchBar` holds an `Rc<RefCell<ConfigStore>>`; `:reload` calls `reload()` and
+  either applies the new config or shows the fatal error panel. Enter and suggestion clicks share the
+  same `activate` path.
 
 ---
 
