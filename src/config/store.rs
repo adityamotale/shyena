@@ -12,7 +12,7 @@ pub enum ReloadOutcome {
 /// Process-wide configuration cache.
 ///
 /// The file is read exactly once when the application starts, so opening the
-/// launcher performs no filesystem I/O. `#config-reload` is the only path that
+/// launcher performs no filesystem I/O. `:reload` is the only path that
 /// re-reads the file, keeping the always-on background process free of watcher
 /// threads and wakeups. A failed load is retried when the launcher opens so a
 /// broken config can be repaired without restarting Shyena.

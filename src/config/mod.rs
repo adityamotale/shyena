@@ -8,9 +8,6 @@ pub use io::{resolve_config_path, ConfigReader};
 pub use parser::{AppDef, ConfigAst, FunctionDef, ParseError, Scanner};
 pub use store::{ConfigStore, ReloadOutcome};
 
-/// Reserved command that re-reads the config from disk (`#config-reload`).
-pub const RESERVED_RELOAD_CMD: &str = "config-reload";
-
 use crate::theme::Theme;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};

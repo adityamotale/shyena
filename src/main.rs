@@ -6,10 +6,12 @@ use global_hotkey::{
 };
 use gpui::*;
 
+mod commands;
 mod config;
 mod exec;
 mod theme;
-use config::{ConfigStore, ReloadOutcome, RESERVED_RELOAD_CMD};
+use commands::InternalCommand;
+use config::{ConfigStore, ReloadOutcome};
 use theme::Theme;
 
 const WIN_WIDTH: f32 = 660.0;
@@ -21,6 +23,7 @@ const MAX_VISIBLE_ITEMS: usize = 6;
 pub enum ActionKind {
     App,
     Ps,
+    Internal,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +31,43 @@ pub struct CandidateAction {
     pub key: String,
     pub kind: ActionKind,
     pub detail: String,
+}
+
+/// Query prefix namespaces. `:` addresses built-in commands; apps and PowerShell
+/// functions keep their existing `@` / `#` scopes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    App,
+    Ps,
+    Internal,
+}
+
+impl Scope {
+    fn from_char(ch: char) -> Option<Self> {
+        match ch {
+            '@' => Some(Self::App),
+            '#' => Some(Self::Ps),
+            ':' => Some(Self::Internal),
+            _ => None,
+        }
+    }
+
+    fn prefix(self) -> char {
+        match self {
+            Self::App => '@',
+            Self::Ps => '#',
+            Self::Internal => ':',
+        }
+    }
+}
+
+/// Splits a single leading scope prefix from the query. Both `@app` and
+/// `@ app` forms are accepted; callers trim the returned remainder as needed.
+fn split_scope(input: &str) -> Option<(Scope, &str)> {
+    let trimmed = input.trim_start();
+    let ch = trimmed.chars().next()?;
+    let scope = Scope::from_char(ch)?;
+    Some((scope, &trimmed[ch.len_utf8()..]))
 }
 
 #[cfg(target_os = "windows")]
@@ -147,9 +187,18 @@ impl ErrorState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CommandTarget {
-    App { key: String, args: Vec<String> },
-    Ps { key: String, args: Vec<String> },
-    Reload,
+    App {
+        key: String,
+        args: Vec<String>,
+    },
+    Ps {
+        key: String,
+        args: Vec<String>,
+    },
+    Internal {
+        command: InternalCommand,
+        args: Vec<String>,
+    },
 }
 
 fn candidate_target(candidate: &CandidateAction, args: Vec<String>) -> CommandTarget {
@@ -162,6 +211,13 @@ fn candidate_target(candidate: &CandidateAction, args: Vec<String>) -> CommandTa
             key: candidate.key.clone(),
             args,
         },
+        ActionKind::Internal => {
+            let spec = commands::find(&candidate.key).expect("internal candidate exists");
+            CommandTarget::Internal {
+                command: spec.command,
+                args,
+            }
+        }
     }
 }
 
@@ -180,47 +236,47 @@ fn resolve_command(
             .ok_or_else(|| "empty command".to_string());
     }
 
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    let first = tokens[0];
-    let (scope, key, rest): (Option<&str>, &str, &[&str]) = if first == "@" || first == "#" {
-        if tokens.len() < 0x02 {
-            return selected
-                .map(|candidate| candidate_target(candidate, Vec::new()))
-                .ok_or_else(|| "expected command after prefix".to_string());
-        }
-        (Some(first), tokens[0x01], &tokens[0x02..])
-    } else if let Some(stripped) = first.strip_prefix('@') {
-        (Some("@"), stripped, &tokens[0x01..])
-    } else if let Some(stripped) = first.strip_prefix('#') {
-        (Some("#"), stripped, &tokens[0x01..])
-    } else {
-        (None, first, &tokens[0x01..])
+    let (scope, rest) = match split_scope(trimmed) {
+        Some((scope, rest)) => (Some(scope), rest.trim_start()),
+        None => (None, trimmed),
     };
 
+    let mut tokens = rest.split_whitespace();
+    let key = tokens.next().unwrap_or("");
     if key.is_empty() {
-        return Err("expected command name".to_string());
+        return selected
+            .map(|candidate| candidate_target(candidate, Vec::new()))
+            .ok_or_else(|| "expected command after prefix".to_string());
     }
 
-    if key.eq_ignore_ascii_case(RESERVED_RELOAD_CMD) && scope != Some("@") {
-        return Ok(CommandTarget::Reload);
+    let args = tokens.map(str::to_string).collect::<Vec<_>>();
+
+    if scope == Some(Scope::Internal) {
+        if let Some(spec) = commands::find(key) {
+            return Ok(CommandTarget::Internal {
+                command: spec.command,
+                args,
+            });
+        }
+
+        return selected
+            .filter(|candidate| candidate.kind == ActionKind::Internal)
+            .map(|candidate| candidate_target(candidate, args))
+            .ok_or_else(|| format!("unknown command '{key}'"));
     }
 
-    let args = rest.iter().map(|token| token.to_string()).collect::<Vec<_>>();
-
-    if scope != Some("#") && config.apps.contains_key(key) {
+    if scope != Some(Scope::Ps) && config.apps.contains_key(key) {
         return Ok(CommandTarget::App {
             key: key.to_string(),
             args,
         });
     }
 
-    if scope != Some("@") {
-        if config.ps.contains_key(key) {
-            return Ok(CommandTarget::Ps {
-                key: key.to_string(),
-                args,
-            });
-        }
+    if scope != Some(Scope::App) && config.ps.contains_key(key) {
+        return Ok(CommandTarget::Ps {
+            key: key.to_string(),
+            args,
+        });
     }
 
     if let Some(candidate) = selected {
@@ -332,23 +388,14 @@ impl SearchBar {
             return;
         }
 
-        let mut tokens_iter = trimmed.split_whitespace();
-        let raw_token = tokens_iter.next().unwrap_or("");
-
-        let (filter_scope, target_token) = if raw_token == "@" {
-            (Some(ActionKind::App), tokens_iter.next().unwrap_or(""))
-        } else if raw_token == "#" {
-            (Some(ActionKind::Ps), tokens_iter.next().unwrap_or(""))
-        } else if let Some(stripped) = raw_token.strip_prefix('@') {
-            (Some(ActionKind::App), stripped)
-        } else if let Some(stripped) = raw_token.strip_prefix('#') {
-            (Some(ActionKind::Ps), stripped)
-        } else {
-            (None, raw_token)
+        let (scope, rest) = match split_scope(trimmed) {
+            Some((scope, rest)) => (Some(scope), rest.trim_start()),
+            None => (None, trimmed),
         };
+        let target_token = rest.split_whitespace().next().unwrap_or("");
 
         let mut candidates = Vec::new();
-        if filter_scope.is_none() || filter_scope == Some(ActionKind::App) {
+        if matches!(scope, None | Some(Scope::App)) {
             for (key, app) in &self.config.apps {
                 if target_token.is_empty()
                     || key.to_lowercase().contains(&target_token.to_lowercase())
@@ -362,7 +409,7 @@ impl SearchBar {
             }
         }
 
-        if filter_scope.is_none() || filter_scope == Some(ActionKind::Ps) {
+        if matches!(scope, None | Some(Scope::Ps)) {
             for (key, ps) in &self.config.ps {
                 if target_token.is_empty()
                     || key.to_lowercase().contains(&target_token.to_lowercase())
@@ -379,6 +426,16 @@ impl SearchBar {
                         detail,
                     });
                 }
+            }
+        }
+
+        if scope == Some(Scope::Internal) {
+            for spec in commands::matching(target_token) {
+                candidates.push(CandidateAction {
+                    key: spec.name.to_string(),
+                    kind: ActionKind::Internal,
+                    detail: spec.description.to_string(),
+                });
             }
         }
 
@@ -514,15 +571,10 @@ impl SearchBar {
             }
             "tab" => {
                 if let Some(candidate) = this.filtered_actions.get(this.selected_index) {
-                    // Keep the active @/# scope so dynamic args still resolve
+                    // Keep the active @/#/: scope so dynamic args still resolve
                     // to the same action when Enter is pressed.
-                    let scope = this
-                        .query
-                        .trim_start()
-                        .chars()
-                        .next()
-                        .filter(|c| *c == '@' || *c == '#')
-                        .map(|c| c.to_string())
+                    let scope = split_scope(&this.query)
+                        .map(|(scope, _)| scope.prefix().to_string())
                         .unwrap_or_default();
                     this.query = format!("{}{} ", scope, candidate.key);
                     this.update_filtered_actions(window);
@@ -576,10 +628,63 @@ impl SearchBar {
                     let _ = self.ps_sender.send_blocking(task);
                 }
             }
+            // Internal commands are dispatched through `activate`, which needs
+            // `&mut self` and the GPUI context.
+            ActionKind::Internal => return,
         }
 
         *self.active_window.borrow_mut() = None;
         window.remove_window();
+    }
+
+    /// Shared entry point for Enter and suggestion clicks so both paths handle
+    /// app launches, PowerShell dispatch, and in-process commands identically.
+    fn activate(
+        &mut self,
+        action: &CandidateAction,
+        dynamic_args: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action.kind {
+            ActionKind::Internal => {
+                let spec = commands::find(&action.key).expect("internal candidate exists");
+                self.run_internal(spec.command, dynamic_args, window, cx);
+            }
+            ActionKind::App | ActionKind::Ps => {
+                self.execute_action(action, dynamic_args, window);
+            }
+        }
+    }
+
+    fn run_internal(
+        &mut self,
+        command: InternalCommand,
+        args: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            InternalCommand::Reload => {
+                if !args.is_empty() {
+                    self.show_error("reload takes no arguments".to_string(), window, cx);
+                    return;
+                }
+
+                let outcome = self.store.borrow_mut().reload();
+                match outcome {
+                    ReloadOutcome::Updated(config) => {
+                        let theme = config.theme;
+                        self.apply_config(config, theme, window, cx);
+                        *self.active_window.borrow_mut() = None;
+                        window.remove_window();
+                    }
+                    ReloadOutcome::Error(message) => {
+                        self.show_config_error(message, window, cx);
+                    }
+                }
+            }
+        }
     }
 
     fn execute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -620,19 +725,8 @@ impl SearchBar {
                 };
                 self.execute_action(&candidate, &args, window);
             }
-            CommandTarget::Reload => {
-                let outcome = self.store.borrow_mut().reload();
-                match outcome {
-                    ReloadOutcome::Updated(config) => {
-                        let theme = config.theme;
-                        self.apply_config(config, theme, window, cx);
-                        *self.active_window.borrow_mut() = None;
-                        window.remove_window();
-                    }
-                    ReloadOutcome::Error(message) => {
-                        self.show_config_error(message, window, cx);
-                    }
-                }
+            CommandTarget::Internal { command, args } => {
+                self.run_internal(command, &args, window, cx);
             }
         }
     }
@@ -646,14 +740,17 @@ impl Render for SearchBar {
 
         let mode_tag = if trimmed.is_empty() {
             None
-        } else if trimmed.starts_with('@') {
-            Some(("LAUNCH", theme.accent()))
-        } else if trimmed.starts_with('#') {
-            Some(("EXEC", theme.peach()))
+        } else if let Some((scope, _)) = split_scope(trimmed) {
+            Some(match scope {
+                Scope::App => ("LAUNCH", theme.accent()),
+                Scope::Ps => ("EXEC", theme.peach()),
+                Scope::Internal => ("SYSTEM", theme.blue()),
+            })
         } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
             match selected.kind {
                 ActionKind::App => Some(("LAUNCH", theme.accent())),
                 ActionKind::Ps => Some(("EXEC", theme.peach())),
+                ActionKind::Internal => Some(("SYSTEM", theme.blue())),
             }
         } else if self.config.apps.contains_key(first_token) {
             Some(("LAUNCH", theme.accent()))
@@ -833,7 +930,7 @@ impl Render for SearchBar {
                                     .child(
                                         div()
                                             .text_color(theme.overlay0())
-                                            .child("@ for apps, # for commands..."),
+                                            .child("@ apps, # commands, : system..."),
                                     )
                                     .child(
                                         div()
@@ -888,6 +985,7 @@ impl Render for SearchBar {
                             let (badge_text, badge_color) = match item.kind {
                                 ActionKind::App => ("APP", theme.accent()),
                                 ActionKind::Ps => ("PS", theme.peach()),
+                                ActionKind::Internal => ("SYS", theme.blue()),
                             };
                             let action_item = item.clone();
 
@@ -907,8 +1005,8 @@ impl Render for SearchBar {
                                 .cursor_pointer()
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _, window, _cx| {
-                                        this.execute_action(&action_item, &[], window);
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.activate(&action_item, &[], window, cx);
                                     }),
                                 )
                                 .child(
@@ -1178,9 +1276,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionKind, CandidateAction, CommandTarget, PsError, PsTask, resolve_command,
-        spawn_powershell_worker,
+        ActionKind, CandidateAction, CommandTarget, PsError, PsTask, Scope, resolve_command,
+        spawn_powershell_worker, split_scope,
     };
+    use crate::commands::InternalCommand;
     use crate::config::{AppAction, Config, PsAction};
     use async_channel::{Receiver, Sender};
     use std::path::PathBuf;
@@ -1222,8 +1321,55 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve_command(&config, "#config-reload", None),
-            Ok(CommandTarget::Reload)
+            resolve_command(&config, ":reload", None),
+            Ok(CommandTarget::Internal {
+                command: InternalCommand::Reload,
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            resolve_command(&config, ": reload", None),
+            Ok(CommandTarget::Internal {
+                command: InternalCommand::Reload,
+                args: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_scopes_internal_commands() {
+        let config = test_config();
+        assert_eq!(
+            resolve_command(&config, ":app", None),
+            Err("unknown command 'app'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, ":ps", None),
+            Err("unknown command 'ps'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "@reload", None),
+            Err("unknown command 'reload'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "#reload", None),
+            Err("unknown command 'reload'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "reload", None),
+            Err("unknown command 'reload'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_forwards_internal_arguments() {
+        let config = test_config();
+        assert_eq!(
+            resolve_command(&config, ":reload extra", None),
+            Ok(CommandTarget::Internal {
+                command: InternalCommand::Reload,
+                args: vec!["extra".to_string()],
+            })
         );
     }
 
@@ -1263,6 +1409,36 @@ mod tests {
                 args: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn test_resolve_command_falls_back_to_selected_internal_candidate() {
+        let config = test_config();
+        let candidate = CandidateAction {
+            key: "reload".to_string(),
+            kind: ActionKind::Internal,
+            detail: String::new(),
+        };
+        assert_eq!(
+            resolve_command(&config, ":re", Some(&candidate)),
+            Ok(CommandTarget::Internal {
+                command: InternalCommand::Reload,
+                args: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_split_scope_parses_combined_and_spaced_prefixes() {
+        assert_eq!(split_scope("@app"), Some((Scope::App, "app")));
+        assert_eq!(split_scope("@ app"), Some((Scope::App, " app")));
+        assert_eq!(split_scope("#ps"), Some((Scope::Ps, "ps")));
+        assert_eq!(split_scope("# ps"), Some((Scope::Ps, " ps")));
+        assert_eq!(split_scope(":reload"), Some((Scope::Internal, "reload")));
+        assert_eq!(split_scope(": reload"), Some((Scope::Internal, " reload")));
+        assert_eq!(split_scope("  :reload"), Some((Scope::Internal, "reload")));
+        assert_eq!(split_scope("plain"), None);
+        assert_eq!(split_scope(""), None);
     }
 
     #[test]
