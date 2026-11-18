@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::config::{Suggestions, fit_diagnostic};
 use crate::theme::Theme;
 
 #[inline]
@@ -46,7 +47,6 @@ fn decode_quoted_literal(raw: &str) -> String {
 }
 
 const DIAGNOSTIC_PREFIX: &str = "~/.config/.shyena";
-const DIAGNOSTIC_MAX_CHARS: usize = 120;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ParseError {
@@ -57,20 +57,10 @@ pub struct ParseError {
 
 impl ParseError {
     pub fn to_diagnostic(&self) -> String {
-        let base = format!(
+        fit_diagnostic(format!(
             "{DIAGNOSTIC_PREFIX}:{}:{}: error: {}",
             self.line, self.col, self.message
-        );
-        if base.chars().count() <= DIAGNOSTIC_MAX_CHARS {
-            base
-        } else {
-            let mut truncated: String = base
-                .chars()
-                .take(DIAGNOSTIC_MAX_CHARS.saturating_sub(3))
-                .collect();
-            truncated.push_str("...");
-            truncated
-        }
+        ))
     }
 }
 
@@ -108,6 +98,7 @@ pub struct ConfigAst<'a> {
     pub apps: Vec<AppDef<'a>>,
     pub functions: Vec<FunctionDef<'a>>,
     pub theme: Option<Theme>,
+    pub suggestions: Option<Suggestions>,
 }
 
 /// Zero-copy byte scanner for `.shyena` configuration files.
@@ -292,6 +283,7 @@ impl<'a> Scanner<'a> {
             apps: Vec::new(),
             functions: Vec::new(),
             theme: None,
+            suggestions: None,
         };
 
         loop {
@@ -340,6 +332,22 @@ impl<'a> Scanner<'a> {
                     ));
                 };
                 ast.theme = Some(theme);
+            } else if kw.eq_ignore_ascii_case("Set-Suggestions") {
+                self.skip_whitespace_and_comments()?;
+                let val_pos = self.pos;
+                let val_line = self.line;
+                let val_line_start = self.line_start;
+                let raw = self.read_string_literal()?;
+                let value = unquote_literal(raw);
+                let Some(suggestions) = Suggestions::from_config_str(value) else {
+                    return Err(self.error_at(
+                        val_pos,
+                        val_line,
+                        val_line_start,
+                        "invalid suggestions value: expected 'on' or 'off'",
+                    ));
+                };
+                ast.suggestions = Some(suggestions);
             } else if kw.eq_ignore_ascii_case("Register-App") {
                 self.skip_whitespace_and_comments()?;
                 let name = self.read_string_literal()?;
@@ -917,6 +925,47 @@ function complex_fn {
 
         let light = Scanner::new("Set-Theme \"LIGHT\"").parse().unwrap();
         assert_eq!(light.theme, Some(Theme::Light));
+    }
+
+    #[test]
+    fn test_parse_set_suggestions() {
+        let on = "Set-Suggestions 'on'\nRegister-App 'a' @{ Path = 'a.exe' }";
+        let ast = Scanner::new(on).parse().expect("on parses");
+        assert_eq!(ast.suggestions, Some(Suggestions::On));
+
+        let off = "set-suggestions \"OFF\"\nfunction f { }";
+        let ast = Scanner::new(off).parse().expect("off parses");
+        assert_eq!(ast.suggestions, Some(Suggestions::Off));
+        assert_eq!(ast.functions.len(), 0x01);
+    }
+
+    #[test]
+    fn test_missing_set_suggestions_is_none() {
+        let ast = Scanner::new("Register-App 'a' @{ Path = 'a.exe' }")
+            .parse()
+            .unwrap();
+        assert_eq!(ast.suggestions, None);
+    }
+
+    #[test]
+    fn test_invalid_suggestions_values_are_rejected() {
+        for source in [
+            "Set-Suggestions 'maybe'",
+            "set-suggestions \"true\"",
+            "Set-Suggestions ''",
+            "Set-Suggestions 'on '",
+        ] {
+            let err = Scanner::new(source).parse().unwrap_err();
+            assert_eq!(
+                err.message,
+                "invalid suggestions value: expected 'on' or 'off'",
+                "source: {source}"
+            );
+            assert_eq!(err.line, 1);
+        }
+
+        let err = Scanner::new("Set-Suggestions on").parse().unwrap_err();
+        assert_eq!(err.message, "expected string literal");
     }
 
     #[test]

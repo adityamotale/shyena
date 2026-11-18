@@ -62,6 +62,9 @@ Queries follow a clean tokenizer contract:
   window bounds remain locked to base height (`62.0 px`);
 - **Dynamic Expansion**: Candidate evaluation triggers on input; window resizes dynamically
   up to `MAX_VISIBLE_ITEMS: 0x06` (`254.0 px`);
+- **Suggestion Toggle**: `Set-Suggestions 'off'` skips candidate evaluation and hides the dropdown
+   entirely; the bar stays at `62.0 px` and exact-key + Enter resolution still works. Omission
+   defaults to `'on'`;
 - **Input Placeholder**: `@ apps, # commands, : system...` conveys the three scope prefixes;
 
 ### Action Tag State Machine
@@ -108,7 +111,13 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
    ```powershell
    Set-Theme 'dark'
    ```
-2. **Application Registration (`Register-App`)**:
+2. **Search Suggestions (`Set-Suggestions`)**:
+   Top-level quoted value controlling the candidate dropdown: `'on'` shows suggestions,
+   `'off'` hides them; values are case-insensitive and omission defaults to `'on'`:
+   ```powershell
+   Set-Suggestions 'on'
+   ```
+3. **Application Registration (`Register-App`)**:
    Static definitions for binaries and fixed arguments with zero dynamic parameter logic:
    ```powershell
    Register-App 'code' @{
@@ -116,7 +125,7 @@ Shyena uses a dedicated configuration file format based on valid PowerShell synt
        Args = @('--reuse-window')
    }
    ```
-3. **PowerShell Automation Functions (`function <name>`)**:
+4. **PowerShell Automation Functions (`function <name>`)**:
    Commands requiring dynamic parameters, system control, or multi-step logic are written as standard PowerShell functions:
    ```powershell
    function brightness {
@@ -148,6 +157,11 @@ default value. Shyena additionally rejects zero-token invocations of functions t
   digit-leading identifiers) are rejected with a line/column diagnostic;
 - `Set-Theme` accepts only quoted `'dark'` / `'light'` values (case-insensitive); any other value
   produces `invalid theme: expected 'dark' or 'light'`;
+- `Set-Suggestions` accepts only quoted `'on'` / `'off'` values (case-insensitive); any other value
+  produces `invalid suggestions value: expected 'on' or 'off'`;
+- Omitting a directive (`Set-Theme`, `Set-Suggestions`, or future settings) is **not** an error:
+  `Config::default()` supplies the value (`dark` theme / suggestions `on`);
+- A missing config file is a fatal error state (§10), distinct from omitted directives;
 - Unterminated block comments (`<# ...`) and trailing junk after a directive are parse errors;
 - `#`/`<# ... #>` comments remain valid and are ignored by the scanner.
 
@@ -341,8 +355,11 @@ from the shipped binary.
   120 characters, and prefixed with the command name;
 - **Configuration errors**: `ConfigStore::load()` parse/IO failures are cached as a diagnostic and
   shown the first time the launcher opens; `:reload` failures render the same overlay, and a
-  successful reload clears it. Because input is ignored in this state, `[Esc]` closes the launcher
-  and the next open retries the load, so repairing the file recovers without a restart;
+  successful reload clears it. A missing file produces a one-line diagnostic naming the exact
+  resolved path (e.g. `C:\Users\<user>\.config\.shyena: error: Shyena config file is missing; ...`)
+  and telling the user to create it. Because input is ignored in this state, `[Esc]` closes the
+  launcher and the next open retries the load, so creating or repairing the file recovers without
+  a restart;
 
 ---
 
@@ -358,12 +375,14 @@ launcher activation is served from that cache: opening the search window perform
 spawns no watcher threads, and schedules no periodic timers (the one-shot working-set trims are
 described in §8).
 
-### Initial Load & First-Run Seeding
+### Initial Load (no runtime seeding)
 
-`ConfigStore::load()` runs in `main.rs` before the hotkey/event loop starts. If `~/.config/.shyena`
-is absent, the default configuration is written and cached; otherwise the file is read with the §6
-single-pass Win32 reader and parsed immediately. Parse/I/O failures are retained as a diagnostic
-while an empty fallback config keeps the UI renderable.
+`ConfigStore::load()` runs in `main.rs` before the hotkey/event loop starts. The file is read with
+the §6 single-pass Win32 reader and parsed immediately. A missing file, I/O failure, or parse error
+is retained as a diagnostic while `Config::default()` (dark theme, suggestions on) keeps the UI
+renderable. The binary never creates the config; `install.ps1` seeds it once (§11). A missing-file
+diagnostic names the exact resolved path (e.g. `C:\Users\<user>\.config\.shyena`) so the location
+to create is unambiguous.
 
 ### Manual Reload (`:reload`)
 
@@ -378,8 +397,8 @@ active and renders the fatal config error panel in place. Command-specific argum
 
 Input is ignored while a fatal config error is displayed, so a failed load is retried when the
 launcher opens: `open_search_window` calls `ConfigStore::reload()` only when the cached diagnostic is
-set. Fixing the file and reopening therefore recovers without restarting Shyena, while the healthy
-path stays I/O-free.
+set. Creating a missing file or fixing an invalid one and reopening therefore recovers without
+restarting Shyena, while the healthy path stays I/O-free.
 
 ### Trade-offs
 
@@ -393,11 +412,14 @@ path stays I/O-free.
   registry);
 - **Core Types**:
   - `ConfigStore`: cached `Arc<Config>`, reusable `ConfigReader`, and the last-load diagnostic;
+    missing/invalid files yield a one-line diagnostic via the shared `fit_diagnostic` helper;
+  - `Config` / `Suggestions`: settings merged from the AST with `Config::default()` fallback for
+    omitted directives; `Set-Suggestions 'off'` keeps candidate rendering disabled;
   - `ReloadOutcome`: `Updated(Arc<Config>)` or `Error(String)`;
   - `CommandSpec` / `InternalCommand`: static metadata and dispatch identity for `:` commands;
 - **UI Integration**: `SearchBar` holds an `Rc<RefCell<ConfigStore>>`; `:reload` calls `reload()` and
   either applies the new config or shows the fatal error panel. Enter and suggestion clicks share the
-  same `activate` path.
+  same `activate` path, and the dropdown is gated on `Config::suggestions`.
 
 ---
 
@@ -422,7 +444,8 @@ path stays I/O-free.
    - Append installation directory to user environment variable `Path`;
 4. **Configuration Seeding**:
    - Primary target: `~/.config/.shyena` (`$env:USERPROFILE\.config\.shyena`);
-   - Writes default theme and initial `@app` / `#ps` bindings only if the file is absent;
+   - Writes default theme, `Set-Suggestions 'on'` and initial `@app` / `#ps` bindings only if the file
+  is absent; the launcher itself never seeds, so a missing file at runtime is an error state (§10);
 5. **Autostart Persistence (HKCU Run Key)**:
    - Registers entry under `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`:
      - Value Name: `"Shyena"`;

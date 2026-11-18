@@ -24,9 +24,10 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// Loads the configuration once. A missing file is seeded with the default
-    /// config; any I/O or parse failure is retained as a diagnostic while a
-    /// fallback (empty) config keeps the UI renderable.
+    /// Loads the configuration once. A missing file, I/O failure, or parse
+    /// failure is retained as a diagnostic (shown as the fatal config error
+    /// panel) while the default config keeps the UI renderable. The binary
+    /// never writes the config itself; installation seeds it once.
     pub fn load(path: PathBuf) -> Self {
         let reader = ConfigReader::new(&path);
         let mut store = Self {
@@ -36,13 +37,9 @@ impl ConfigStore {
             diagnostic: None,
         };
 
-        if store.path.exists() {
-            match store.read_from_disk() {
-                Ok(config) => store.current = Arc::new(config),
-                Err(diagnostic) => store.diagnostic = Some(diagnostic),
-            }
-        } else {
-            store.current = Arc::new(Config::create_default_config(&store.path));
+        match store.read_from_disk() {
+            Ok(config) => store.current = Arc::new(config),
+            Err(diagnostic) => store.diagnostic = Some(diagnostic),
         }
 
         store
@@ -79,10 +76,22 @@ impl ConfigStore {
     }
 
     fn read_from_disk(&mut self) -> Result<Config, String> {
-        let raw = self
-            .reader
-            .read()
-            .map_err(|err| format!("~/.config/.shyena:1:1: error: failed to read config: {err}"))?;
+        // Lead with the exact resolved path so the one-line error panel tells
+        // the user precisely where the config file must be created. This
+        // message is deliberately not truncated: the path must stay intact.
+        if !self.path.exists() {
+            return Err(format!(
+                "{}: error: Shyena config file is missing; create it at this path, then reopen",
+                self.path.display()
+            ));
+        }
+
+        let raw = self.reader.read().map_err(|err| {
+            format!(
+                "{}: error: failed to read config: {err}",
+                self.path.display()
+            )
+        })?;
         let ast = Scanner::new(raw)
             .parse()
             .map_err(|err| err.to_diagnostic())?;
@@ -93,6 +102,8 @@ impl ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Suggestions;
+    use crate::theme::Theme;
 
     fn temp_config_path(name: &str) -> PathBuf {
         let dir =
@@ -103,13 +114,58 @@ mod tests {
     }
 
     #[test]
-    fn test_load_seeds_default_config_when_missing() {
-        let path = temp_config_path("seed");
+    fn test_load_reports_missing_file_with_exact_path() {
+        let path = temp_config_path("missing_load");
         let store = ConfigStore::load(path.clone());
 
-        assert!(path.exists(), "default config is written on first load");
+        assert!(!path.exists(), "a missing config must not be auto-created");
+        assert!(store.has_error());
+        let diagnostic = store.diagnostic().expect("diagnostic recorded");
+        assert!(
+            diagnostic.contains(&path.to_string_lossy().to_string()),
+            "diagnostic must contain the exact path, got: {diagnostic}"
+        );
+        assert!(diagnostic.contains("missing"), "got: {diagnostic}");
+        assert_eq!(
+            diagnostic,
+            format!(
+                "{}: error: Shyena config file is missing; create it at this path, then reopen",
+                path.display()
+            )
+        );
+        assert_eq!(store.current().theme, Theme::Dark);
+        assert_eq!(store.current().suggestions, Suggestions::On);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_missing_file_recovers_when_created() {
+        let path = temp_config_path("missing_recovery");
+        let mut store = ConfigStore::load(path.clone());
+        assert!(store.has_error());
+
+        std::fs::write(&path, "Set-Suggestions 'off'\n").unwrap();
+        match store.reload() {
+            ReloadOutcome::Updated(config) => {
+                assert_eq!(config.suggestions, Suggestions::Off);
+            }
+            ReloadOutcome::Error(message) => panic!("expected recovery, got: {message}"),
+        }
         assert!(store.diagnostic().is_none());
-        assert!(store.current().apps.contains_key("helium"));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_load_without_directives_uses_defaults() {
+        let path = temp_config_path("no_directives");
+        std::fs::write(&path, "Register-App 'editor' @{ Path = 'code.exe' }\n").unwrap();
+        let store = ConfigStore::load(path.clone());
+
+        assert!(!store.has_error());
+        assert_eq!(store.current().theme, Theme::Dark);
+        assert_eq!(store.current().suggestions, Suggestions::On);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -129,6 +185,23 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_suggestions_value_is_fatal() {
+        let path = temp_config_path("bad_suggestions");
+        std::fs::write(&path, "Set-Suggestions 'maybe'\n").unwrap();
+
+        let store = ConfigStore::load(path.clone());
+
+        let diagnostic = store.diagnostic().expect("diagnostic recorded");
+        assert!(
+            diagnostic.contains("invalid suggestions value"),
+            "got: {diagnostic}"
+        );
+        assert!(store.current().apps.is_empty());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn test_reload_swaps_in_new_config() {
         let path = temp_config_path("reload");
         std::fs::write(&path, "Register-App 'editor' @{ Path = 'code.exe' }\n").unwrap();
@@ -137,7 +210,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            "Set-Theme 'light'\nRegister-App 'terminal' @{ Path = 'wt.exe' }\n",
+            "Set-Theme 'light'\nSet-Suggestions 'off'\nRegister-App 'terminal' @{ Path = 'wt.exe' }\n",
         )
         .unwrap();
 
@@ -145,7 +218,8 @@ mod tests {
             ReloadOutcome::Updated(config) => {
                 assert!(config.apps.contains_key("terminal"));
                 assert!(!config.apps.contains_key("editor"));
-                assert_eq!(config.theme, crate::theme::Theme::Light);
+                assert_eq!(config.theme, Theme::Light);
+                assert_eq!(config.suggestions, Suggestions::Off);
             }
             ReloadOutcome::Error(message) => panic!("expected success, got: {message}"),
         }
@@ -190,7 +264,7 @@ mod tests {
 
         match store.reload() {
             ReloadOutcome::Updated(config) => {
-                assert_eq!(config.theme, crate::theme::Theme::Light);
+                assert_eq!(config.theme, Theme::Light);
                 assert!(config.apps.contains_key("term"));
             }
             ReloadOutcome::Error(message) => panic!("expected recovery, got: {message}"),
@@ -209,10 +283,15 @@ mod tests {
 
         match store.reload() {
             ReloadOutcome::Error(message) => {
-                assert!(message.contains("failed to read config"), "got: {message}");
+                assert!(
+                    message.contains(&path.to_string_lossy().to_string()),
+                    "diagnostic must contain the exact path, got: {message}"
+                );
+                assert!(message.contains("missing"), "got: {message}");
             }
-            ReloadOutcome::Updated(_) => panic!("expected I/O failure"),
+            ReloadOutcome::Updated(_) => panic!("expected missing-file failure"),
         }
+        assert!(store.has_error());
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

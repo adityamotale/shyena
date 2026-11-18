@@ -396,6 +396,16 @@ impl SearchBar {
             return;
         }
 
+        // Suggestions off: keep the bar at base height and skip candidate
+        // evaluation. Exact-key resolution on Enter still works via
+        // `resolve_command`.
+        if !self.config.suggestions.enabled() {
+            self.filtered_actions.clear();
+            self.selected_index = 0;
+            self.resize_to_bar(window);
+            return;
+        }
+
         let (scope, rest) = match split_scope(trimmed) {
             Some((scope, rest)) => (Some(scope), rest.trim_start()),
             None => (None, trimmed),
@@ -992,7 +1002,7 @@ impl Render for SearchBar {
                             .child(format!("[ {} ]", label))
                     })),
             )
-            .children(if !self.filtered_actions.is_empty() {
+            .children(if self.config.suggestions.enabled() && !self.filtered_actions.is_empty() {
                 let selected_idx = self.selected_index;
                 let visible_items = self.filtered_actions.iter().take(MAX_VISIBLE_ITEMS).enumerate();
 
