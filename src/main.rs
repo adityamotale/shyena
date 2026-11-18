@@ -1149,11 +1149,11 @@ fn toggle_search_window(
     let mut was_open = false;
 
     if let Some(handle) = win_ref.as_ref() {
-        if handle.update(cx, |_, window, _| {
-            window.remove_window();
-        }).is_ok() {
-            was_open = true;
-        }
+        was_open = handle
+            .update(cx, |_, window, _| {
+                window.remove_window();
+            })
+            .is_ok();
     }
 
     *win_ref = None;
@@ -1259,7 +1259,7 @@ fn main() {
                                 ps_error_tx.clone(),
                                 store.clone(),
                             );
-                            *active.borrow_mut() = Some(handle.clone());
+                            *active.borrow_mut() = Some(handle);
                             handle
                         }
                     };
@@ -1271,7 +1271,7 @@ fn main() {
                         .is_err()
                     {
                         let handle = open_search_window(cx, active.clone(), ps_error_tx, store);
-                        *active.borrow_mut() = Some(handle.clone());
+                        *active.borrow_mut() = Some(handle);
                         let _ = handle.update(cx, |bar, window, cx| {
                             bar.show_error(message, window, cx);
                         });

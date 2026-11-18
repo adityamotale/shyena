@@ -4,13 +4,12 @@ use std::path::PathBuf;
 use crate::theme::Theme;
 
 #[inline]
-fn unquote_literal<'a>(lit: &'a str) -> &'a str {
-    if (lit.starts_with('\'') && lit.ends_with('\''))
-        || (lit.starts_with('"') && lit.ends_with('"'))
+fn unquote_literal(lit: &str) -> &str {
+    if ((lit.starts_with('\'') && lit.ends_with('\''))
+        || (lit.starts_with('"') && lit.ends_with('"')))
+        && lit.len() >= 0x02
     {
-        if lit.len() >= 0x02 {
-            return &lit[1..lit.len() - 1];
-        }
+        return &lit[1..lit.len() - 1];
     }
     lit
 }

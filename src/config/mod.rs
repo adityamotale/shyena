@@ -124,55 +124,6 @@ function brightness {
     }
 }
 
-pub fn encode_powershell_script(script: &str) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-    let mut out = String::with_capacity((utf16.len() + 2) / 3 * 4);
-    let chunks = utf16.chunks_exact(3);
-    let remainder = chunks.remainder();
-
-    for chunk in chunks {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk[1] as usize;
-        let b2 = chunk[2] as usize;
-        out.push(TABLE[b0 >> 2] as char);
-        out.push(TABLE[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
-        out.push(TABLE[((b1 & 0x0F) << 2) | (b2 >> 6)] as char);
-        out.push(TABLE[b2 & 0x3F] as char);
-    }
-
-    match remainder.len() {
-        1 => {
-            let b0 = remainder[0] as usize;
-            out.push(TABLE[b0 >> 2] as char);
-            out.push(TABLE[(b0 & 0x03) << 4] as char);
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            let b0 = remainder[0] as usize;
-            let b1 = remainder[1] as usize;
-            out.push(TABLE[b0 >> 2] as char);
-            out.push(TABLE[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
-            out.push(TABLE[(b1 & 0x0F) << 2] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-
-    out
-}
-
-/// Parses an app hashtable block using the strict scanner. Intended for compatibility/testing.
-/// Returns `(PathBuf, Vec<String>)` or defaults on parse error.
-pub fn parse_app_hashtable(span: &str) -> (PathBuf, Vec<String>) {
-    let src = format!("Register-App 'x' @{}", span.trim());
-    match parser::Scanner::new(&src).parse() {
-        Ok(ast) if !ast.apps.is_empty() => (ast.apps[0].path.clone(), ast.apps[0].args.clone()),
-        _ => (PathBuf::new(), Vec::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,12 +207,5 @@ function brightness {
         let missing = "Register-App 'wt' @{ Path = 'wt.exe' }";
         let ast = Scanner::new(missing).parse().unwrap();
         assert_eq!(Config::from_ast(&ast).theme, Theme::Dark);
-    }
-
-    #[test]
-    fn test_encode_powershell_script() {
-        let script = "Write-Output 'OK'";
-        let encoded = encode_powershell_script(script);
-        assert_eq!(encoded, "VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAE8ASwAnAA==");
     }
 }

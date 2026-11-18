@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(reader.read().unwrap_err().kind(), io::ErrorKind::NotFound);
 
         let bad_utf8 = temp_test_path("bad_utf8");
-        fs::write(&bad_utf8, &[0xFF, 0xFE, 0xFD]).unwrap();
+        fs::write(&bad_utf8, [0xFF, 0xFE, 0xFD]).unwrap();
         let mut reader = ConfigReader::new(&bad_utf8);
         assert_eq!(reader.read().unwrap_err().kind(), io::ErrorKind::InvalidData);
 
