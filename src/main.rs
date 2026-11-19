@@ -1,4 +1,8 @@
-#![windows_subsystem = "windows"]
+// Release builds are GUI-only (no console flash). Debug builds keep the
+// console subsystem so `cargo run` can be interrupted with Ctrl+C: a GUI
+// subsystem process is not attached to the terminal's console and never
+// receives its Ctrl+C event.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! Shyena: a global-hotkey launcher built on GPUI.
 //!
@@ -20,15 +24,13 @@ mod ui;
 #[cfg(test)]
 mod test_support;
 
-use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc, time::Duration};
-
 use async_channel::{Receiver, Sender};
-use gpui::{App, Application};
-
 use bootstrap::LauncherContext;
 use config::ConfigStore;
 use dispatch::PsError;
 use effects::SystemEffects;
+use gpui::{App, Application};
+use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 /// One-line cap for every error rendered in the 62 px panel.
 pub(crate) const ERROR_LINE_MAX_CHARS: usize = 120;

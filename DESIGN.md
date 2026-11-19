@@ -491,7 +491,9 @@ restarting Shyena, while the healthy path stays I/O-free.
    - Zero background polling or daemon overhead; executed once by `explorer.exe` at logon;
 6. **Immediate Detached Launch**:
    - Invoked via `Start-Process -FilePath $binTarget -WorkingDirectory $installDir`;
-   - Zero console flash when binary uses `#![windows_subsystem = "windows"]` (`0x02`);
+   - Zero console flash: the `windows_subsystem = "windows"` attribute is gated to release builds
+     (`#![cfg_attr(not(debug_assertions), ...)]`), so installed binaries stay GUI-only while
+     `cargo run` debug builds keep a console and can be interrupted with Ctrl+C;
 
 ---
 
