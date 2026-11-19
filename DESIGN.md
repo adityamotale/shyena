@@ -163,7 +163,10 @@ aliases such as `stop` or `sleep`.
            throw 'No WMI-controllable display was found.'
        }
        foreach ($display in $displays) {
-           $display.WmiSetBrightness(1, $Level)
+           Invoke-CimMethod -InputObject $display -MethodName WmiSetBrightness -Arguments @{
+               Timeout = 1
+               Brightness = $Level
+           } | Out-Null
        }
    }
    ```

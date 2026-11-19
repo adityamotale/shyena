@@ -231,6 +231,26 @@ function brightness {
     }
 
     #[test]
+    fn test_default_brightness_uses_cim_method_invocation() {
+        let ast = Scanner::new(Config::DEFAULT_SHYENA)
+            .parse()
+            .expect("default config parses");
+        let cfg = Config::from_ast(&ast);
+        let brightness = cfg.ps.get("brightness").expect("brightness exists");
+
+        assert!(
+            brightness
+                .body
+                .contains("Invoke-CimMethod -InputObject $display -MethodName WmiSetBrightness"),
+            "brightness must invoke the WMI method via Invoke-CimMethod"
+        );
+        assert!(
+            !brightness.body.contains(".WmiSetBrightness("),
+            "CimInstance objects do not support direct WMI method calls"
+        );
+    }
+
+    #[test]
     fn test_theme_from_ast() {
         let light = "Set-Theme 'light'\nRegister-App 'wt' @{ Path = 'wt.exe' }";
         let ast = Scanner::new(light).parse().unwrap();

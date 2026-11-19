@@ -71,7 +71,10 @@ function brightness {
     }
 
     foreach ($display in $displays) {
-        $display.WmiSetBrightness(1, $Level)
+        Invoke-CimMethod -InputObject $display -MethodName WmiSetBrightness -Arguments @{
+            Timeout = 1
+            Brightness = $Level
+        } | Out-Null
     }
 }
 
