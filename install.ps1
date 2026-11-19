@@ -533,4 +533,15 @@ finally {
     }
 }
 
-exit $exitCode
+$global:LASTEXITCODE = $exitCode
+
+# In a real terminal, wait for Enter so a dedicated console window or tab stays
+# open; redirected/non-interactive runs keep the process exit code for automation.
+$redirected = $false
+try { $redirected = [Console]::IsInputRedirected } catch { }
+if (-not [Environment]::UserInteractive -or $redirected) {
+    exit $exitCode
+}
+
+Write-Host ''
+Read-Host 'Press Enter to finish'
