@@ -13,6 +13,7 @@
 
 - [Overview](#overview)
 - [Installation](#installation)
+- [Uninstall](#uninstall)
 - [Quick Start](#quick-start)
 - [Etymology](#etymology)
 - [Runtime Guarantees](#runtime-guarantees)
@@ -42,6 +43,16 @@ irm https://raw.githubusercontent.com/adityamotale/shyena/master/install.ps1 | i
 > Target environment requires Windows 10 or 11 (build 19041 / 0x4A61 or newer) and PowerShell 5.1+.
 >
 > Administrative elevation is neither requested nor required
+
+## Uninstall
+
+Run the uninstaller inside an interactive PowerShell console:
+
+```powershell
+irm https://raw.githubusercontent.com/adityamotale/shyena/master/uninstall.ps1 | iex
+```
+
+Retains `~/.config/.shyena` by default; pass `-PurgeConfig` to remove configuration files
 
 ## Quick Start
 
