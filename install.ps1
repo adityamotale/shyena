@@ -84,10 +84,11 @@ function Read-ShyenaChecksums {
 function Test-ShyenaChecksums {
     param(
         [string]$Directory,
-        [hashtable]$Expected
+        [hashtable]$Expected,
+        [string]$ConfigName
     )
 
-    foreach ($name in @('shyena.exe', 'default.shyena')) {
+    foreach ($name in @('shyena.exe', $ConfigName)) {
         if (-not $Expected.ContainsKey($name)) {
             throw "SHA256SUMS does not contain an entry for $name."
         }
@@ -137,12 +138,23 @@ try {
 
     $releaseBase = Get-ShyenaReleaseBase
     Write-Host "Downloading Shyena from $releaseBase ..."
-    foreach ($asset in @('SHA256SUMS', 'shyena.exe', 'default.shyena')) {
+    Save-ShyenaAsset -Name 'SHA256SUMS' -BaseUrl $releaseBase -Destination (Join-Path $tempDir 'SHA256SUMS')
+    $checksums = Read-ShyenaChecksums -Path (Join-Path $tempDir 'SHA256SUMS')
+
+    # New releases ship the config as '.shyena'; older tags used 'default.shyena'.
+    if ($checksums.ContainsKey('.shyena')) {
+        $configAsset = '.shyena'
+    } elseif ($checksums.ContainsKey('default.shyena')) {
+        $configAsset = 'default.shyena'
+    } else {
+        throw 'SHA256SUMS does not contain an entry for the config asset.'
+    }
+
+    foreach ($asset in @('shyena.exe', $configAsset)) {
         Save-ShyenaAsset -Name $asset -BaseUrl $releaseBase -Destination (Join-Path $tempDir $asset)
     }
 
-    $checksums = Read-ShyenaChecksums -Path (Join-Path $tempDir 'SHA256SUMS')
-    Test-ShyenaChecksums -Directory $tempDir -Expected $checksums
+    Test-ShyenaChecksums -Directory $tempDir -Expected $checksums -ConfigName $configAsset
     Write-Host 'Checksums verified.'
 
     if ($DryRun) {
@@ -176,7 +188,7 @@ try {
 
     if (-not (Test-Path -LiteralPath $configTarget)) {
         New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $tempDir 'default.shyena') -Destination $configTarget
+        Copy-Item -LiteralPath (Join-Path $tempDir $configAsset) -Destination $configTarget
         Write-Host "Created config: $configTarget"
     } else {
         Write-Host "Kept existing config: $configTarget"

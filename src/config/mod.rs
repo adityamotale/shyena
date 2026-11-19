@@ -60,18 +60,27 @@ pub struct PsAction {
 }
 
 impl Config {
-    /// Returns the one canonical location of `.shyena`.
+    /// Returns the location of `.shyena` for the current build.
     ///
-    /// `%USERPROFILE%` wins on Windows; `$HOME` is the fallback for other
-    /// environments, and a working-directory-relative path is the last resort.
-    /// The binary only reads this file — installation seeds it once.
+    /// Debug builds read the canonical repo-root file so development never
+    /// touches the user's installed configuration. Release builds read the
+    /// installed copy: `%USERPROFILE%` wins on Windows, `$HOME` is the fallback
+    /// for other environments, and a working-directory-relative path is the
+    /// last resort. The binary only reads the file — installation seeds it once.
     pub fn config_path() -> PathBuf {
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map_or_else(
-                || PathBuf::from(".config/.shyena"),
-                |home| PathBuf::from(home).join(".config").join(".shyena"),
-            )
+        #[cfg(debug_assertions)]
+        {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".shyena")
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map_or_else(
+                    || PathBuf::from(".config/.shyena"),
+                    |home| PathBuf::from(home).join(".config").join(".shyena"),
+                )
+        }
     }
 
     pub fn from_ast(ast: &ConfigAst<'_>) -> Self {
@@ -112,17 +121,48 @@ impl Config {
         }
     }
 
-    /// Canonical default config, embedded from `assets/default.shyena` so the
-    /// repository template is the single source of truth for tests. The actual
-    /// file is copied to `~/.config/.shyena` by `install.ps1`; the binary never
-    /// writes it.
+    /// Canonical config, embedded from the repo-root `.shyena` so the repository
+    /// file is the single source of truth. It is also the file debug builds read
+    /// at runtime and the template `install.ps1` copies to `~/.config/.shyena`.
     #[cfg(test)]
-    const DEFAULT_SHYENA: &str = include_str!("../../assets/default.shyena");
+    const DEFAULT_SHYENA: &str = include_str!("../../.shyena");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn test_debug_config_path_points_at_repo_root_config() {
+        let path = Config::config_path();
+        assert_eq!(
+            path,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".shyena")
+        );
+        assert!(path.exists(), "repo-root .shyena must exist: {path:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read repo-root .shyena"),
+            Config::DEFAULT_SHYENA
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn test_debug_store_loads_repo_root_config() {
+        use crate::config::ConfigStore;
+
+        let store = ConfigStore::load(Config::config_path());
+        assert!(!store.has_error(), "{:?}", store.diagnostic());
+        assert!(!store.current().ps.is_empty(), "dev config has functions");
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn test_release_config_path_points_at_installed_config() {
+        let path = Config::config_path();
+        assert!(path.ends_with(".config/.shyena"), "got: {path:?}");
+    }
 
     #[test]
     fn test_parse_shyena_ast_and_function_invocation() {

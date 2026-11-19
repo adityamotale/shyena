@@ -10,6 +10,9 @@ The following require a real Windows desktop and are intentionally not automated
 - visual appearance of both themes.
 
 Run `cargo build --release` and start the binary, then work through each case.
+Note: release builds read the installed `~/.config/.shyena`, while debug builds
+(`cargo run`) read the repository-root `.shyena` instead. Edit the file matching
+your build when testing configuration reload.
 
 ## 1. Hotkey and window lifecycle
 

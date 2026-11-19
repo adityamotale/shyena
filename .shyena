@@ -1,9 +1,11 @@
 # =============================================================================
-# Shyena default configuration
+# Shyena configuration
 #
-# Installed at %USERPROFILE%\.config\.shyena by install.ps1 when no configuration
-# exists. Shyena reads this file once at startup; after editing, run ":reload"
-# from the launcher or restart Shyena to apply changes.
+# This is the canonical config file: it is the template installed to
+# %USERPROFILE%\.config\.shyena by install.ps1, and it is the file read directly
+# by debug builds (cargo run) during development. Release builds read the
+# installed copy instead. After editing, run ":reload" from the launcher or
+# restart Shyena to apply changes.
 #
 # Scopes:  @  registered applications     #  PowerShell functions
 #          :  built-in system commands

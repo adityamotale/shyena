@@ -102,12 +102,14 @@ Queries follow a clean tokenizer contract:
 Shyena uses a dedicated configuration file format based on valid PowerShell syntax, removing TOML multi-line escaping overhead.
 
 ### Target Path
-- Primary path: `~/.config/.shyena`;
+- Development (debug) builds: the repository-root `.shyena` file;
+- Installed (release) builds: `~/.config/.shyena`.
 
 ### Default Configuration Template
 
-The canonical starter file lives in the repository at `assets/default.shyena` and is embedded into
-the binary for tests via `include_str!` in `src/config/mod.rs`. `install.ps1` copies it to
+The canonical file lives at the repository root as `.shyena` and is embedded into the binary for
+tests via `include_str!` in `src/config/mod.rs`. Debug builds read that file directly at runtime, so
+development never touches the user's installed config. `install.ps1` copies it to
 `~/.config/.shyena` on first install (§11); Shyena itself never creates the file (§10).
 
 The template is organised into clearly labelled sections, in this order:
@@ -196,7 +198,7 @@ default value. Shyena additionally rejects zero-token invocations of functions t
 - `#`/`<# ... #>` comments remain valid and are ignored by the scanner.
 
 ### Architectural Considerations
-- The `# shyena:v1` header in `assets/default.shyena` is an informational schema marker; the scanner
+- The `# shyena:v1` header in `.shyena` is an informational schema marker; the scanner
   treats it as a comment and does not enforce it, so older header-less files remain valid;
 - The default template explicitly declares both settings, so its behaviour matches `Config::default()`
   exactly; omission still falls back to those defaults;
@@ -410,12 +412,14 @@ described in §8).
 
 ### Initial Load (no runtime seeding)
 
-`ConfigStore::load()` runs in `main.rs` before the hotkey/event loop starts. The file is read with
-the §6 single-pass Win32 reader and parsed immediately. A missing file, I/O failure, or parse error
-is retained as a diagnostic while `Config::default()` (dark theme, suggestions on) keeps the UI
-renderable. The binary never creates the config; `install.ps1` seeds it once by copying
-`assets/default.shyena` (§4). A missing-file diagnostic names the exact resolved path (e.g.
-`C:\Users\<user>\.config\.shyena`) so the location to create is unambiguous.
+`ConfigStore::load()` runs in `main.rs` before the hotkey/event loop starts, with the path from
+`Config::config_path()`: debug builds resolve the repository-root `.shyena`, release builds the
+installed `~/.config/.shyena`. The file is read with the §6 single-pass Win32 reader and parsed
+immediately. A missing file, I/O failure, or parse error is retained as a diagnostic while
+`Config::default()` (dark theme, suggestions on) keeps the UI renderable. The binary never creates
+the config; `install.ps1` seeds it once by copying `.shyena` (§4). A missing-file diagnostic names
+the exact resolved path (e.g. `C:\Users\<user>\.config\.shyena`) so the location to create is
+unambiguous.
 
 ### Manual Reload (`:reload`)
 
@@ -481,7 +485,8 @@ restarting Shyena, while the healthy path stays I/O-free.
    - Append installation directory to user environment variable `Path`;
 4. **Configuration Seeding**:
    - Primary target: `~/.config/.shyena` (`$env:USERPROFILE\.config\.shyena`);
-   - Copy `assets/default.shyena` (the canonical template from §4) to the target path **only when the
+   - Download the `.shyena` release asset (with a `default.shyena` fallback for older tagged
+     releases) and copy it to the target path **only when the
      file does not already exist**, creating the parent `.config` directory if needed; never overwrite
      an existing config, even one that omits directives or looks incomplete;
    - The launcher itself never seeds, so a missing file at runtime is an error state (§10);
@@ -516,5 +521,5 @@ restarting Shyena, while the healthy path stays I/O-free.
 - Unregister the autostart key from `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`;
 - Remove the installation directory (`%LOCALAPPDATA%\Programs\shyena`);
 - Clean user `Path` environment variable;
-- Retain `~/.config/.shyena` (the file seeded from `assets/default.shyena` in §11) by default to
+- Retain `~/.config/.shyena` (the file seeded from `.shyena` in §11) by default to
   preserve user definitions unless an explicit `-PurgeConfig` flag is provided;

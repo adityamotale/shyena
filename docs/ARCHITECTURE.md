@@ -8,9 +8,11 @@ is dismissed, so the global hotkey and error channels never need re-initialising
 There is at most one launcher window, tracked by `ui::ActiveWindow` — a shared
 `Rc<RefCell<Option<WindowHandle<SearchBar>>>>`.
 
-The binary never writes `.shyena`. Installation seeds the file once; `ConfigStore`
-reads it at startup and serves every open from memory. Only `:reload` and
-recovery from a failed load touch the disk.
+The binary never writes `.shyena`. Installation seeds the installed copy once;
+`ConfigStore` reads it at startup and serves every open from memory. Debug
+builds resolve `Config::config_path()` to the repository-root `.shyena` so
+development reads the canonical file instead of the installed config. Only
+`:reload` and recovery from a failed load touch the disk.
 
 ## Module map
 

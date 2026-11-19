@@ -28,13 +28,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item -Path 'target/x86_64-pc-windows-msvc/release/shyena.exe' -Destination 'dist/shyena.exe'
-          Copy-Item -Path 'assets/default.shyena' -Destination 'dist/default.shyena'
+          Copy-Item -LiteralPath '.shyena' -Destination 'dist/.shyena'
 
       - name: Generate SHA256SUMS
         shell: pwsh
         run: |
           $dist = Join-Path $pwd.Path 'dist'
-          $lines = @('shyena.exe', 'default.shyena') | ForEach-Object {
+          $lines = @('shyena.exe', '.shyena') | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $dist $_)).Hash.ToLowerInvariant()
             "$hash  $_"
           }
@@ -50,5 +50,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/shyena.exe
-            dist/default.shyena
+            dist/.shyena
             dist/SHA256SUMS
