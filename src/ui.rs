@@ -4,12 +4,14 @@
 //! list, and Enter or a click produces a [`CommandIntent`] for the UI to run.
 //! Failures surface in-place through [`ErrorState`].
 
-use std::{cell::RefCell, rc::Rc, sync::Arc, thread, time::Duration};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 use async_channel::Sender;
+#[cfg(test)]
+use gpui::TestAppContext;
 use gpui::{
     App, AppContext, Bounds, Context, Div, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, ParentElement, Render, Rgba, Styled, Subscription, Timer, Window,
+    KeyDownEvent, MouseButton, ParentElement, Render, Rgba, Styled, Subscription, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point,
     px, size,
 };
@@ -17,10 +19,9 @@ use gpui::{
 use crate::commands::{self, InternalCommand};
 use crate::config::{self, ConfigStore, ReloadOutcome};
 use crate::dispatch::{
-    ActionKind, CandidateAction, CommandIntent, PsError, Scope, resolve_command, run_ps_task,
-    split_scope,
+    ActionKind, CandidateAction, CommandIntent, PsError, Scope, resolve_command, split_scope,
 };
-use crate::platform;
+use crate::effects::Effects;
 use crate::theme::{Palette, Theme};
 
 const WIN_WIDTH: f32 = 660.0;
@@ -53,12 +54,19 @@ impl ErrorState {
 /// Trim only while no launcher window is open. The delay keeps the syscall off
 /// the teardown/next-frame path, and the guard cancels a pending trim when the
 /// user reopens the bar within that window.
-pub(crate) fn schedule_trim(cx: &App, active_window: &ActiveWindow, delay: Duration) {
+pub(crate) fn schedule_trim(
+    cx: &App,
+    active_window: &ActiveWindow,
+    effects: &Effects,
+    delay: Duration,
+) {
     let active = active_window.clone();
-    cx.spawn(async move |_| {
-        Timer::after(delay).await;
+    let effects = effects.clone();
+    cx.spawn(async move |cx| {
+        // The GPUI timer honours the test dispatcher's virtual clock.
+        cx.background_executor().timer(delay).await;
         if active.borrow().is_none() {
-            platform::trim_working_set();
+            effects.trim_working_set();
         }
     })
     .detach();
@@ -103,6 +111,7 @@ pub(crate) struct SearchBar {
     config: Arc<config::Config>,
     ps_error_tx: Sender<PsError>,
     store: Rc<RefCell<ConfigStore>>,
+    effects: Effects,
     theme: Theme,
     selected_index: usize,
     filtered_actions: Vec<CandidateAction>,
@@ -116,6 +125,7 @@ impl SearchBar {
         active_window: ActiveWindow,
         ps_error_tx: Sender<PsError>,
         store: Rc<RefCell<ConfigStore>>,
+        effects: Effects,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
@@ -123,8 +133,7 @@ impl SearchBar {
         let config = store.borrow().current();
         let theme = config.theme;
 
-        platform::setup_window(window);
-        let _ = platform::make_always_on_top(window);
+        effects.configure_window(window);
 
         let subscription = cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
@@ -145,6 +154,7 @@ impl SearchBar {
             config,
             ps_error_tx,
             store,
+            effects,
             theme,
             selected_index: 0,
             filtered_actions: Vec::new(),
@@ -324,7 +334,12 @@ impl SearchBar {
     fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
         *self.active_window.borrow_mut() = None;
         window.remove_window();
-        schedule_trim(cx, &self.active_window, Duration::from_millis(200));
+        schedule_trim(
+            cx,
+            &self.active_window,
+            &self.effects,
+            Duration::from_millis(200),
+        );
     }
 
     fn handle_key(
@@ -404,31 +419,17 @@ impl SearchBar {
     /// Spawns the configured application with static then dynamic arguments.
     fn launch_app(&self, key: &str, dynamic_args: &[String]) {
         if let Some(app) = self.config.apps.get(key) {
-            let mut cmd = std::process::Command::new(&app.path);
-            cmd.args(&app.args);
-            cmd.args(dynamic_args);
-            if let Err(err) = cmd.spawn() {
-                eprintln!("Failed to spawn {}: {}", app.path.display(), err);
-            }
+            let mut args = app.args.clone();
+            args.extend_from_slice(dynamic_args);
+            self.effects.spawn_app(&app.path, &args);
         }
     }
 
-    /// Spawns a worker thread for a PowerShell function. Errors travel back
-    /// through the shared channel; a thread-spawn failure is reported directly.
+    /// Dispatches a PowerShell function through the injected effects boundary.
     fn launch_ps(&self, key: &str, dynamic_args: &[String]) {
         if let Some(ps) = self.config.ps.get(key) {
-            let name = key.to_string();
-            let body = ps.body.clone();
-            let args = dynamic_args.to_vec();
-            let error_tx = self.ps_error_tx.clone();
-            if let Err(err) = thread::Builder::new()
-                .name("shyena-ps-task".into())
-                .spawn(move || run_ps_task(&name, &body, &args, &error_tx))
-            {
-                let _ = self.ps_error_tx.send_blocking(PsError {
-                    message: format!("{key}: failed to start task: {err}"),
-                });
-            }
+            self.effects
+                .spawn_powershell(key, &ps.body, dynamic_args, self.ps_error_tx.clone());
         }
     }
 
@@ -815,6 +816,7 @@ pub(crate) fn open_search_window(
     active_window: &ActiveWindow,
     ps_error_tx: Sender<PsError>,
     store: &Rc<RefCell<ConfigStore>>,
+    effects: &Effects,
 ) -> WindowHandle<SearchBar> {
     // Healthy opens are pure memory. Retry the load only when the cached one
     // failed, so a repaired config recovers on the next hotkey press.
@@ -859,9 +861,10 @@ pub(crate) fn open_search_window(
     cx.activate(true);
     let active_ref = active_window.clone();
     let store_ref = store.clone();
+    let effects = effects.clone();
     let handle = cx
         .open_window(options, move |window, cx| {
-            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_error_tx, store_ref))
+            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_error_tx, store_ref, effects))
         })
         .unwrap();
 
@@ -881,6 +884,7 @@ pub(crate) fn toggle_search_window(
     active_window: &ActiveWindow,
     ps_error_tx: &Sender<PsError>,
     store: &Rc<RefCell<ConfigStore>>,
+    effects: &Effects,
 ) {
     let opened = active_window.borrow_mut().take();
     let was_open = opened.is_some_and(|handle| {
@@ -890,9 +894,272 @@ pub(crate) fn toggle_search_window(
     });
 
     if was_open {
-        schedule_trim(cx, active_window, Duration::from_millis(200));
+        schedule_trim(cx, active_window, effects, Duration::from_millis(200));
     } else {
-        let handle = open_search_window(cx, active_window, ps_error_tx.clone(), store);
+        let handle = open_search_window(cx, active_window, ps_error_tx.clone(), store, effects);
         *active_window.borrow_mut() = Some(handle);
+    }
+}
+
+/// Returns the error text currently shown, if any. Used by the async pump tests.
+#[cfg(test)]
+pub(crate) fn error_message<C: AppContext>(
+    window: &WindowHandle<SearchBar>,
+    cx: &mut C,
+) -> Option<String> {
+    window
+        .update(cx, |bar, _, _| {
+            bar.error.as_ref().map(|e| e.message().to_string())
+        })
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gpui::{Keystroke, Modifiers, VisualTestContext};
+
+    use super::*;
+    use crate::test_support::{AppLaunch, RecordingEffects, TestConfig, UI_CONFIG};
+
+    struct Harness {
+        cx: VisualTestContext,
+        window: WindowHandle<SearchBar>,
+        active: ActiveWindow,
+        effects: Arc<RecordingEffects>,
+        config: TestConfig,
+    }
+
+    fn open(cx: &TestAppContext, source: &str) -> Harness {
+        let mut cx = cx.new_app();
+        let effects = RecordingEffects::new();
+        let config = TestConfig::new("harness", source);
+        let active: ActiveWindow = Rc::new(RefCell::new(None));
+        let (ps_tx, _ps_rx) = async_channel::unbounded();
+        let store = config.store.clone();
+        let recorder = effects.clone();
+        let window = cx.add_window(|window, cx| {
+            SearchBar::new(window, cx, active.clone(), ps_tx, store, recorder)
+        });
+        *active.borrow_mut() = Some(window);
+        let cx = VisualTestContext::from_window(*window, &cx);
+        cx.run_until_parked();
+        Harness {
+            cx,
+            window,
+            active,
+            effects,
+            config,
+        }
+    }
+
+    impl Harness {
+        fn state<R>(&mut self, read: impl FnOnce(&SearchBar) -> R) -> R {
+            self.window
+                .update(&mut self.cx, |bar, _, _| read(bar))
+                .expect("launcher window is open")
+        }
+
+        fn query(&mut self) -> String {
+            self.state(|bar| bar.query.clone())
+        }
+
+        fn candidates(&mut self) -> Vec<String> {
+            self.state(|bar| bar.filtered_actions.iter().map(|c| c.key.clone()).collect())
+        }
+
+        fn selected(&mut self) -> usize {
+            self.state(|bar| bar.selected_index)
+        }
+
+        fn error(&mut self) -> Option<String> {
+            self.state(|bar| bar.error.as_ref().map(|e| e.message().to_string()))
+        }
+
+        /// Drives timers scheduled with `Timer::after` on the foreground executor.
+        fn advance(&mut self, duration: Duration) {
+            self.cx.cx.executor().advance_clock(duration);
+            self.cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn typing_filters_candidates_and_tab_completes_scope(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input("@ c");
+        assert_eq!(h.query(), "@ c");
+        assert_eq!(h.candidates(), vec!["calc"]);
+
+        // key_char path (real IME input) must behave like the key fallback above.
+        h.cx.dispatch_keystroke(
+            *h.window,
+            Keystroke {
+                modifiers: Modifiers::none(),
+                key: "a".into(),
+                key_char: Some("a".into()),
+            },
+        );
+        assert_eq!(h.query(), "@ ca");
+
+        h.cx.simulate_keystrokes("tab");
+        // Tab completion keeps the scope prefix attached to the key.
+        assert_eq!(h.query(), "@calc ");
+        assert_eq!(h.selected(), 0);
+    }
+
+    #[gpui::test]
+    fn enter_launches_app_with_static_and_dynamic_args(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input("@notepad");
+        h.cx.simulate_keystrokes("space");
+        h.cx.simulate_input("extra");
+        h.cx.simulate_keystrokes("enter");
+
+        assert_eq!(
+            h.effects.app_launches(),
+            vec![AppLaunch {
+                path: PathBuf::from(r"C:\Windows\System32\notepad.exe"),
+                args: vec!["--flag".to_string(), "extra".to_string()],
+            }]
+        );
+        assert!(h.active.borrow().is_none(), "window closes after launch");
+        h.advance(Duration::from_millis(300));
+        assert_eq!(h.effects.trims(), 1);
+    }
+
+    #[gpui::test]
+    fn enter_dispatches_powershell_with_dynamic_args(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input("#brightness");
+        h.cx.simulate_keystrokes("space");
+        h.cx.simulate_input("42");
+        h.cx.simulate_keystrokes("enter");
+
+        let launches = h.effects.ps_launches();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].name, "brightness");
+        assert_eq!(launches[0].args, vec!["42".to_string()]);
+        assert!(launches[0].body.contains("param([int]$Level)"));
+        assert!(h.active.borrow().is_none());
+    }
+
+    #[gpui::test]
+    fn arrow_keys_change_selection(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_keystrokes("@");
+        assert_eq!(h.candidates(), vec!["calc", "notepad"]);
+        assert_eq!(h.selected(), 0);
+
+        h.cx.simulate_keystrokes("down");
+        assert_eq!(h.selected(), 1);
+
+        h.cx.simulate_keystrokes("enter");
+        assert_eq!(
+            h.effects.app_launches()[0].path,
+            PathBuf::from(r"C:\Windows\System32\notepad.exe")
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_a_candidate_activates_it(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_keystrokes("@");
+        // Header is 20px, input 42px, rows are 32px: first row centre is y=78.
+        // Our handler acts on mouse-down; mouse-up cannot be delivered because
+        // activation closes the window immediately.
+        h.cx.simulate_mouse_down(
+            point(px(100.0), px(78.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+
+        assert_eq!(h.effects.app_launches()[0].path, PathBuf::from("calc.exe"));
+    }
+
+    #[gpui::test]
+    fn reload_swaps_config_and_closes_window(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+        h.config
+            .rewrite("Set-Theme 'light'\nRegister-App 'term' @{ Path = 'wt.exe' }\n");
+
+        h.cx.simulate_input(":reload");
+        let query = h.query();
+        assert_eq!(query, ":reload", "query before enter");
+        h.cx.simulate_keystrokes("enter");
+
+        assert_eq!(h.config.store.borrow().current().theme, Theme::Light);
+        assert!(h.config.store.borrow().current().apps.contains_key("term"));
+        assert!(h.active.borrow().is_none());
+    }
+
+    #[gpui::test]
+    fn runtime_error_is_dismissible_without_closing(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input("bogus");
+        let query = h.query();
+        assert_eq!(query, "bogus", "query before enter");
+        h.cx.simulate_keystrokes("enter");
+        assert_eq!(h.error().as_deref(), Some("unknown command 'bogus'"));
+        assert!(h.active.borrow().is_some());
+
+        h.cx.simulate_keystrokes("escape");
+        assert_eq!(h.error(), None);
+        assert_eq!(h.query(), "");
+        assert!(h.active.borrow().is_some());
+    }
+
+    #[gpui::test]
+    fn fatal_config_error_closes_on_escape(cx: &TestAppContext) {
+        let config = TestConfig::new("fatal", "Set-Theme 'mocha'");
+        let effects = RecordingEffects::new();
+        let active: ActiveWindow = Rc::new(RefCell::new(None));
+        let (ps_tx, _ps_rx) = async_channel::unbounded();
+        let recorder: Effects = effects.clone();
+        let store = config.store.clone();
+        let window = cx.update(|app| open_search_window(app, &active, ps_tx, &store, &recorder));
+        let mut cx = VisualTestContext::from_window(*window, cx);
+        cx.run_until_parked();
+
+        let message = error_message(&window, &mut cx.cx).expect("config error shown");
+        assert!(message.contains("invalid theme"), "{message}");
+
+        cx.simulate_keystrokes("escape");
+        assert!(active.borrow().is_none());
+    }
+
+    #[gpui::test]
+    fn empty_query_enter_only_closes(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_keystrokes("enter");
+
+        assert_eq!(h.effects.app_launches(), Vec::new());
+        assert_eq!(h.effects.ps_launches(), Vec::new());
+        h.advance(Duration::from_millis(300));
+        assert!(h.active.borrow().is_none());
+        assert_eq!(h.effects.trims(), 1);
+        assert_eq!(h.effects.window_configures(), 1);
+    }
+
+    #[gpui::test]
+    fn suggestions_off_still_resolves_exact_keys(cx: &TestAppContext) {
+        let mut h = open(
+            cx,
+            "Set-Suggestions 'off'\nRegister-App 'calc' @{ Path = 'calc.exe' }",
+        );
+
+        h.cx.simulate_input("@calc");
+        assert_eq!(h.candidates(), Vec::<String>::new());
+        h.cx.simulate_keystrokes("enter");
+
+        assert_eq!(h.effects.app_launches()[0].path, PathBuf::from("calc.exe"));
     }
 }

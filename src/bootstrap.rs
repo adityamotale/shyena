@@ -15,6 +15,7 @@ use gpui::App;
 
 use crate::config::ConfigStore;
 use crate::dispatch::PsError;
+use crate::effects::Effects;
 use crate::ui::{self, ActiveWindow};
 
 /// Handles shared by both pumps and the composition root.
@@ -22,6 +23,7 @@ pub(crate) struct LauncherContext {
     pub(crate) active_window: ActiveWindow,
     pub(crate) config_store: Rc<RefCell<ConfigStore>>,
     pub(crate) ps_error_tx: Sender<PsError>,
+    pub(crate) effects: Effects,
 }
 
 /// Registers Alt+Backquote and forwards presses to the UI channel from a
@@ -52,19 +54,22 @@ pub(crate) fn spawn_error_pump(cx: &mut App, rx: Receiver<PsError>, ctx: &Launch
     let active = ctx.active_window.clone();
     let ps_error_tx = ctx.ps_error_tx.clone();
     let store = ctx.config_store.clone();
+    let effects = ctx.effects.clone();
 
     cx.spawn(async move |cx| {
         while let Ok(err) = rx.recv().await {
             let active = active.clone();
             let ps_error_tx = ps_error_tx.clone();
             let store = store.clone();
+            let effects = effects.clone();
             let message = err.message;
             let _ = cx.update(move |cx| {
                 let handle = active.borrow().as_ref().copied();
                 let handle = if let Some(handle) = handle {
                     handle
                 } else {
-                    let handle = ui::open_search_window(cx, &active, ps_error_tx.clone(), &store);
+                    let handle =
+                        ui::open_search_window(cx, &active, ps_error_tx.clone(), &store, &effects);
                     *active.borrow_mut() = Some(handle);
                     handle
                 };
@@ -75,7 +80,7 @@ pub(crate) fn spawn_error_pump(cx: &mut App, rx: Receiver<PsError>, ctx: &Launch
                     })
                     .is_err()
                 {
-                    let handle = ui::open_search_window(cx, &active, ps_error_tx, &store);
+                    let handle = ui::open_search_window(cx, &active, ps_error_tx, &store, &effects);
                     *active.borrow_mut() = Some(handle);
                     let _ = handle.update(cx, |bar, window, cx| {
                         bar.show_error(message, window, cx);
@@ -88,27 +93,138 @@ pub(crate) fn spawn_error_pump(cx: &mut App, rx: Receiver<PsError>, ctx: &Launch
 }
 
 /// Turns hotkey events into launcher toggles on the UI thread.
-pub(crate) fn spawn_hotkey_pump(
+///
+/// `keep_alive` holds the real `GlobalHotKeyManager` for the process lifetime;
+/// tests pass `()` so no OS-level hotkey is ever registered.
+pub(crate) fn spawn_hotkey_pump<K: 'static>(
     cx: &mut App,
     rx: Receiver<()>,
     ctx: &LauncherContext,
-    hotkey_manager: GlobalHotKeyManager,
+    keep_alive: K,
 ) {
     let active = ctx.active_window.clone();
     let ps_error_tx = ctx.ps_error_tx.clone();
     let store = ctx.config_store.clone();
+    let effects = ctx.effects.clone();
 
     cx.spawn(async move |cx| {
-        // Keep the manager in the async task scope so it is never dropped.
-        let _manager = hotkey_manager;
+        let _keep_alive = keep_alive;
         while let Ok(()) = rx.recv().await {
             let active = active.clone();
             let ps_error_tx = ps_error_tx.clone();
             let store = store.clone();
+            let effects = effects.clone();
             let _ = cx.update(move |cx| {
-                ui::toggle_search_window(cx, &active, &ps_error_tx, &store);
+                ui::toggle_search_window(cx, &active, &ps_error_tx, &store, &effects);
             });
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::test_support::{RecordingEffects, TestConfig, UI_CONFIG};
+
+    struct PumpHarness {
+        ctx: LauncherContext,
+        hotkey_tx: Sender<()>,
+        ps_tx: Sender<PsError>,
+        // Kept alive so the temp config directory survives the test.
+        _config: TestConfig,
+        effects: Arc<RecordingEffects>,
+    }
+
+    fn harness(cx: &TestAppContext) -> PumpHarness {
+        let config = TestConfig::new("pump", UI_CONFIG);
+        let effects = RecordingEffects::new();
+        let (hotkey_tx, hotkey_rx) = async_channel::unbounded();
+        let (ps_tx, ps_rx) = async_channel::unbounded();
+        let ctx = LauncherContext {
+            active_window: Rc::new(RefCell::new(None)),
+            config_store: config.store.clone(),
+            ps_error_tx: ps_tx.clone(),
+            effects: effects.clone(),
+        };
+        cx.update(|app| {
+            spawn_hotkey_pump(app, hotkey_rx, &ctx, ());
+            spawn_error_pump(app, ps_rx, &ctx);
+        });
+        PumpHarness {
+            ctx,
+            hotkey_tx,
+            ps_tx,
+            _config: config,
+            effects,
+        }
+    }
+
+    fn advance(cx: &TestAppContext) {
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.executor().run_until_parked();
+    }
+
+    #[gpui::test]
+    fn hotkey_toggles_launcher_window(cx: &TestAppContext) {
+        let h = harness(cx);
+
+        h.hotkey_tx.send_blocking(()).unwrap();
+        advance(cx);
+        assert!(h.ctx.active_window.borrow().is_some(), "first press opens");
+
+        h.hotkey_tx.send_blocking(()).unwrap();
+        advance(cx);
+        assert!(
+            h.ctx.active_window.borrow().is_none(),
+            "second press closes"
+        );
+        assert_eq!(h.effects.trims(), 1);
+    }
+
+    #[gpui::test]
+    fn error_pump_opens_a_window_when_none_exists(cx: &TestAppContext) {
+        let h = harness(cx);
+
+        h.ps_tx
+            .send_blocking(PsError {
+                message: "brightness: failed".into(),
+            })
+            .unwrap();
+        advance(cx);
+
+        let handle = h
+            .ctx
+            .active_window
+            .borrow()
+            .as_ref()
+            .copied()
+            .expect("pump opens a window");
+        let message = cx.update(|app| ui::error_message(&handle, app));
+        assert_eq!(message.as_deref(), Some("brightness: failed"));
+    }
+
+    #[gpui::test]
+    fn error_pump_reuses_an_open_window(cx: &TestAppContext) {
+        let h = harness(cx);
+        h.hotkey_tx.send_blocking(()).unwrap();
+        advance(cx);
+        let before = h.ctx.active_window.borrow().as_ref().copied().unwrap();
+
+        h.ps_tx
+            .send_blocking(PsError {
+                message: "volume: failed".into(),
+            })
+            .unwrap();
+        advance(cx);
+
+        let after = h.ctx.active_window.borrow().as_ref().copied().unwrap();
+        assert_eq!(before, after, "the same window handle is reused");
+        let message = cx.update(|app| ui::error_message(&after, app));
+        assert_eq!(message.as_deref(), Some("volume: failed"));
+    }
 }

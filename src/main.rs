@@ -11,12 +11,16 @@ mod bootstrap;
 mod commands;
 mod config;
 mod dispatch;
+mod effects;
 mod exec;
 mod platform;
 mod theme;
 mod ui;
 
-use std::{borrow::Cow, cell::RefCell, rc::Rc, time::Duration};
+#[cfg(test)]
+mod test_support;
+
+use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 use async_channel::{Receiver, Sender};
 use gpui::{App, Application};
@@ -24,6 +28,7 @@ use gpui::{App, Application};
 use bootstrap::LauncherContext;
 use config::ConfigStore;
 use dispatch::PsError;
+use effects::SystemEffects;
 
 /// One-line cap for every error rendered in the 62 px panel.
 pub(crate) const ERROR_LINE_MAX_CHARS: usize = 120;
@@ -56,10 +61,16 @@ fn main() {
             active_window: Rc::new(RefCell::new(None)),
             config_store,
             ps_error_tx: ps_err_tx,
+            effects: Arc::new(SystemEffects),
         };
 
         // Reclaim startup pages once fonts, renderers and the anchor have settled.
-        ui::schedule_trim(cx, &context.active_window, Duration::from_secs(2));
+        ui::schedule_trim(
+            cx,
+            &context.active_window,
+            &context.effects,
+            Duration::from_secs(2),
+        );
 
         bootstrap::spawn_error_pump(cx, ps_err_rx, &context);
         let manager = bootstrap::setup_global_hotkey(hotkey_tx);
