@@ -11,8 +11,8 @@
 
 ## Index
 
-- [Overview](#overview)
 - [Installation](#installation)
+- [Update](#update)
 - [Uninstall](#uninstall)
 - [Quick Start](#quick-start)
 - [Etymology](#etymology)
@@ -21,19 +21,9 @@
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
 
-## Overview
-
-Shyena is an always-on, low-latency Windows launcher engineered for keyboard-driven workflows;
-it maps global hotkey <kbd>Alt</kbd> + <kbd>`</kbd> directly to instant process dispatch and
-transient PowerShell automation.
-
-Resident execution operates behind a lightweight 1×1 hidden Win32 anchor proxy;
-configuration is parsed once at initialization into memory, requiring zero file-system watcher
-threads and zero ambient background processes while idle.
-
 ## Installation
 
-Run the bootstrap installer inside an interactive PowerShell console:
+Run the bootstrap installer inside an interactive PowerShell console,
 
 ```powershell
 irm https://raw.githubusercontent.com/adityamotale/shyena/master/install.ps1 | iex
@@ -46,7 +36,7 @@ irm https://raw.githubusercontent.com/adityamotale/shyena/master/install.ps1 | i
 
 ## Update
 
-Update directly inside Shyena via `:update`, or run the updater in PowerShell:
+Update directly inside Shyena via `:update`, or run the updater in PowerShell,
 
 ```powershell
 irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | iex
@@ -54,7 +44,7 @@ irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | ie
 
 ## Uninstall
 
-Run the uninstaller inside an interactive PowerShell console:
+Run the uninstaller inside an interactive PowerShell console,
 
 ```powershell
 irm https://raw.githubusercontent.com/adityamotale/shyena/master/uninstall.ps1 | iex
@@ -104,7 +94,7 @@ Just like its namesake, this project is defiant, fast, and built for precision.
 > Script automation runs strictly on transient worker threads spawned on demand.
 
 > [!NOTE]
-> Hotkey registration remains bound to a permanent hidden 1×1 Win32 anchor.
+> Hotkey registration remains bound to a permanent hidden 1x1 Win32 anchor.
 >
 > Toggling the search surface creates or drops foreground presentation without unregistering global hotkey
 > hooks or fighting OS window focus loss.
@@ -112,8 +102,7 @@ Just like its namesake, this project is defiant, fast, and built for precision.
 ## Configuration
 
 Production configuration resides at `~/.config/.shyena` (local debug builds read root [`.shyena`](.shyena));
-syntax follows declarative PowerShell source evaluated once at boot:
-
+syntax follows declarative PowerShell source evaluated once at boot,
 ```powershell
 Set-Theme 'light'       # 'dark' = Macchiato (default), 'light' = Latte
 Set-Suggestions 'on'    # 'off' = exact key + Enter only, no dropdown

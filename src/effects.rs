@@ -77,7 +77,13 @@ impl LauncherEffects for SystemEffects {
              irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | iex"
         );
         let mut cmd = std::process::Command::new("powershell.exe");
-        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ]);
         if let Err(err) = cmd.spawn() {
             eprintln!("Failed to spawn updater: {err}");
         }
