@@ -1,188 +1,48 @@
-use gpui::{rgb, rgba, Rgba};
+//! Colour tokens for the launcher UI.
+//!
+//! The UI renders a fixed set of semantic roles (accent, chrome, text states),
+//! not an arbitrary palette. Keeping only those roles as data makes a theme
+//! switch a single match and leaves no unused accessor API to maintain.
 
-/// Catppuccin Macchiato palette and semantic token system (Dark Matte)
-#[allow(dead_code)]
-pub struct Macchiato;
+use gpui::{Rgba, rgb, rgba};
 
-#[allow(dead_code)]
-impl Macchiato {
-    pub const NAME: &'static str = "Catppuccin Macchiato";
-
-    #[inline(always)]
-    pub fn rosewater() -> Rgba { rgb(0xf4dbd6) }
-    #[inline(always)]
-    pub fn flamingo() -> Rgba { rgb(0xf0c6c6) }
-    #[inline(always)]
-    pub fn pink() -> Rgba { rgb(0xf5bde6) }
-    #[inline(always)]
-    pub fn mauve() -> Rgba { rgb(0xc6a0f6) }
-    #[inline(always)]
-    pub fn red() -> Rgba { rgb(0xed8796) }
-    #[inline(always)]
-    pub fn maroon() -> Rgba { rgb(0xee99a0) }
-    #[inline(always)]
-    pub fn peach() -> Rgba { rgb(0xf5a97f) }
-    #[inline(always)]
-    pub fn yellow() -> Rgba { rgb(0xeed49f) }
-    #[inline(always)]
-    pub fn green() -> Rgba { rgb(0xa6da95) }
-    #[inline(always)]
-    pub fn teal() -> Rgba { rgb(0x8bd5ca) }
-    #[inline(always)]
-    pub fn sky() -> Rgba { rgb(0x91d7e3) }
-    #[inline(always)]
-    pub fn sapphire() -> Rgba { rgb(0x7dc4e4) }
-    #[inline(always)]
-    pub fn blue() -> Rgba { rgb(0x8aadf4) }
-    #[inline(always)]
-    pub fn lavender() -> Rgba { rgb(0xb7bdf8) }
-
-    #[inline(always)]
-    pub fn text() -> Rgba { rgb(0xcad3f5) }
-    #[inline(always)]
-    pub fn subtext1() -> Rgba { rgb(0xb8c0e0) }
-    #[inline(always)]
-    pub fn subtext0() -> Rgba { rgb(0xa5adcb) }
-    #[inline(always)]
-    pub fn overlay2() -> Rgba { rgb(0x939ab7) }
-    #[inline(always)]
-    pub fn overlay1() -> Rgba { rgb(0x8087a2) }
-    #[inline(always)]
-    pub fn overlay0() -> Rgba { rgb(0x6e738d) }
-    #[inline(always)]
-    pub fn surface2() -> Rgba { rgb(0x5b6078) }
-    #[inline(always)]
-    pub fn surface1() -> Rgba { rgb(0x494d64) }
-    #[inline(always)]
-    pub fn surface0() -> Rgba { rgb(0x363a4f) }
-
-    #[inline(always)]
-    pub fn base_solid() -> Rgba { rgb(0x24273a) }
-    #[inline(always)]
-    pub fn mantle_solid() -> Rgba { rgb(0x1e2030) }
-    #[inline(always)]
-    pub fn crust_solid() -> Rgba { rgb(0x181926) }
-
-    #[inline(always)]
-    pub fn border_frame() -> Rgba { rgba(0xa6da9566) }
-    #[inline(always)]
-    pub fn border_subtle() -> Rgba { rgba(0x363a4f99) }
-    #[inline(always)]
-    pub fn border_focus() -> Rgba { Self::green() }
-
-    #[inline(always)]
-    pub fn terminal_bg() -> Rgba { rgb(0x1b1d2b) }
-    #[inline(always)]
-    pub fn terminal_header() -> Rgba { rgb(0x202233) }
-    #[inline(always)]
-    pub fn terminal_frame() -> Rgba { rgba(0xa6da9580) }
-    #[inline(always)]
-    pub fn terminal_bracket() -> Rgba { rgba(0xa6da95cc) }
-
-    #[inline(always)]
-    pub fn item_active_bg() -> Rgba { rgba(0x494d6488) }
-    #[inline(always)]
-    pub fn item_hover_bg() -> Rgba { rgba(0x363a4f66) }
-    #[inline(always)]
-    pub fn keycap_bg() -> Rgba { rgba(0x1e2030cc) }
-    #[inline(always)]
-    pub fn keycap_border() -> Rgba { rgba(0x494d64cc) }
-    #[inline(always)]
-    pub fn search_glyph() -> Rgba { Self::green() }
+/// Colours the launcher actually draws, named by role rather than by hue so UI
+/// code never has to know which Catppuccin shade a theme happens to use.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    /// Primary action colour: cursor, prompt, `LAUNCH`/`APP` badge.
+    pub accent: Rgba,
+    /// PowerShell action colour: `EXEC`/`PS` badge.
+    pub ps: Rgba,
+    /// In-process command colour: `SYSTEM`/`SYS` badge.
+    pub internal: Rgba,
+    /// Errors and the error-panel border.
+    pub error: Rgba,
+    /// Primary foreground text.
+    pub text: Rgba,
+    /// Secondary text for candidate details; tuned per theme for readability.
+    pub detail_text: Rgba,
+    /// Low-emphasis key hints in the header.
+    pub hint: Rgba,
+    /// Placeholder text in the empty input field.
+    pub placeholder: Rgba,
+    /// Window background.
+    pub bg: Rgba,
+    /// Header strip background.
+    pub header: Rgba,
+    /// Window border and card outline.
+    pub frame: Rgba,
+    /// ASCII bracket glyphs in the header.
+    pub bracket: Rgba,
+    /// Hairline separators.
+    pub border_subtle: Rgba,
+    /// Selected-row and mode-tag background.
+    pub surface0: Rgba,
+    /// Mode-tag and badge border.
+    pub surface1: Rgba,
 }
 
-/// Catppuccin Latte palette and semantic token system (Light Matte)
-#[allow(dead_code)]
-pub struct Latte;
-
-#[allow(dead_code)]
-impl Latte {
-    pub const NAME: &'static str = "Catppuccin Latte";
-
-    #[inline(always)]
-    pub fn rosewater() -> Rgba { rgb(0xdc8a78) }
-    #[inline(always)]
-    pub fn flamingo() -> Rgba { rgb(0xdd7878) }
-    #[inline(always)]
-    pub fn pink() -> Rgba { rgb(0xea76cb) }
-    #[inline(always)]
-    pub fn mauve() -> Rgba { rgb(0x8839ef) }
-    #[inline(always)]
-    pub fn red() -> Rgba { rgb(0xd20f39) }
-    #[inline(always)]
-    pub fn maroon() -> Rgba { rgb(0xe64553) }
-    #[inline(always)]
-    pub fn peach() -> Rgba { rgb(0xfe640b) }
-    #[inline(always)]
-    pub fn yellow() -> Rgba { rgb(0xdf8e1d) }
-    #[inline(always)]
-    pub fn green() -> Rgba { rgb(0x40a02b) }
-    #[inline(always)]
-    pub fn teal() -> Rgba { rgb(0x179299) }
-    #[inline(always)]
-    pub fn sky() -> Rgba { rgb(0x04a5e5) }
-    #[inline(always)]
-    pub fn sapphire() -> Rgba { rgb(0x209fb5) }
-    #[inline(always)]
-    pub fn blue() -> Rgba { rgb(0x1e66f5) }
-    #[inline(always)]
-    pub fn lavender() -> Rgba { rgb(0x7287fd) }
-
-    #[inline(always)]
-    pub fn text() -> Rgba { rgb(0x4c4f69) }
-    #[inline(always)]
-    pub fn subtext1() -> Rgba { rgb(0x5c5f77) }
-    #[inline(always)]
-    pub fn subtext0() -> Rgba { rgb(0x6c6f85) }
-    #[inline(always)]
-    pub fn overlay2() -> Rgba { rgb(0x7c7f93) }
-    #[inline(always)]
-    pub fn overlay1() -> Rgba { rgb(0x8c8fa1) }
-    #[inline(always)]
-    pub fn overlay0() -> Rgba { rgb(0x9ca0b0) }
-    #[inline(always)]
-    pub fn surface2() -> Rgba { rgb(0xacb0be) }
-    #[inline(always)]
-    pub fn surface1() -> Rgba { rgb(0xbcc0cc) }
-    #[inline(always)]
-    pub fn surface0() -> Rgba { rgb(0xccd0da) }
-
-    #[inline(always)]
-    pub fn base_solid() -> Rgba { rgb(0xeff1f5) }
-    #[inline(always)]
-    pub fn mantle_solid() -> Rgba { rgb(0xe6e9ef) }
-    #[inline(always)]
-    pub fn crust_solid() -> Rgba { rgb(0xdce0e8) }
-
-    #[inline(always)]
-    pub fn border_frame() -> Rgba { rgba(0x1e66f566) }
-    #[inline(always)]
-    pub fn border_subtle() -> Rgba { rgba(0xacb0be88) }
-    #[inline(always)]
-    pub fn border_focus() -> Rgba { Self::blue() }
-
-    #[inline(always)]
-    pub fn terminal_bg() -> Rgba { Self::base_solid() }
-    #[inline(always)]
-    pub fn terminal_header() -> Rgba { Self::mantle_solid() }
-    #[inline(always)]
-    pub fn terminal_frame() -> Rgba { rgba(0x1e66f580) }
-    #[inline(always)]
-    pub fn terminal_bracket() -> Rgba { rgba(0x1e66f5cc) }
-
-    #[inline(always)]
-    pub fn item_active_bg() -> Rgba { rgba(0x1e66f51f) }
-    #[inline(always)]
-    pub fn item_hover_bg() -> Rgba { rgba(0x1e66f512) }
-    #[inline(always)]
-    pub fn keycap_bg() -> Rgba { rgba(0x1e66f51f) }
-    #[inline(always)]
-    pub fn keycap_border() -> Rgba { rgba(0x1e66f540) }
-    #[inline(always)]
-    pub fn search_glyph() -> Rgba { Self::blue() }
-}
-
-/// Runtime theme selection backed by `Set-Theme` in `.shyena`.
+/// Runtime theme selection, backed by `Set-Theme` in `.shyena`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Theme {
     #[default]
@@ -190,8 +50,51 @@ pub enum Theme {
     Light,
 }
 
-#[allow(dead_code)]
 impl Theme {
+    /// Resolves the token set for this theme. The result is copied once per
+    /// frame; `Palette` is small enough that this stays cheaper than indirection.
+    #[inline]
+    pub fn palette(self) -> Palette {
+        match self {
+            Self::Dark => Palette {
+                accent: rgb(0x00a6_da95), // Catppuccin green
+                ps: rgb(0x00f5_a97f),
+                internal: rgb(0x008a_adf4),
+                error: rgb(0x00ed_8796),
+                text: rgb(0x00ca_d3f5),
+                detail_text: rgb(0x00a5_adcb), // subtext0
+                hint: rgb(0x00a5_adcb),
+                placeholder: rgb(0x006e_738d), // overlay0
+                bg: rgb(0x001b_1d2b),
+                header: rgb(0x0020_2233),
+                frame: rgba(0xa6da_9580),
+                bracket: rgba(0xa6da_95cc),
+                border_subtle: rgba(0x363a_4f99),
+                surface0: rgb(0x0036_3a4f),
+                surface1: rgb(0x0049_4d64),
+            },
+            Self::Light => Palette {
+                accent: rgb(0x001e_66f5), // Catppuccin blue reads better on a light base
+                ps: rgb(0x00fe_640b),
+                internal: rgb(0x001e_66f5),
+                error: rgb(0x00d2_0f39),
+                text: rgb(0x004c_4f69),
+                detail_text: rgb(0x005c_5f77), // subtext1
+                hint: rgb(0x006c_6f85),        // subtext0
+                placeholder: rgb(0x009c_a0b0), // overlay0
+                bg: rgb(0x00ef_f1f5),
+                header: rgb(0x00e6_e9ef),
+                frame: rgba(0x1e66_f580),
+                bracket: rgba(0x1e66_f5cc),
+                border_subtle: rgba(0xacb0_be88),
+                surface0: rgb(0x00cc_d0da),
+                surface1: rgb(0x00bc_c0cc),
+            },
+        }
+    }
+
+    /// Parses the `Set-Theme` directive value; unknown values are rejected by
+    /// the config parser rather than silently falling back to the default.
     #[inline]
     pub fn from_config_str(value: &str) -> Option<Self> {
         if value.eq_ignore_ascii_case("dark") {
@@ -202,121 +105,39 @@ impl Theme {
             None
         }
     }
-
-    #[inline]
-    pub fn as_config_str(self) -> &'static str {
-        match self {
-            Self::Dark => "dark",
-            Self::Light => "light",
-        }
-    }
-
-    #[inline]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Dark => Macchiato::NAME,
-            Self::Light => Latte::NAME,
-        }
-    }
-
-    /// Semantic accent: green in dark mode, vivid blue in light mode.
-    #[inline]
-    pub fn accent(self) -> Rgba {
-        self.search_glyph()
-    }
-
-    /// Candidate detail text: stronger in light mode for readability on base.
-    #[inline]
-    pub fn detail_text(self) -> Rgba {
-        match self {
-            Self::Dark => Macchiato::subtext0(),
-            Self::Light => Latte::subtext1(),
-        }
-    }
 }
-
-macro_rules! delegate_theme {
-    ($($method:ident),* $(,)?) => {
-        #[allow(dead_code)]
-        impl Theme {
-            $(
-                #[inline(always)]
-                pub fn $method(self) -> Rgba {
-                    match self {
-                        Self::Dark => Macchiato::$method(),
-                        Self::Light => Latte::$method(),
-                    }
-                }
-            )*
-        }
-    };
-}
-
-delegate_theme!(
-    rosewater,
-    flamingo,
-    pink,
-    mauve,
-    red,
-    maroon,
-    peach,
-    yellow,
-    green,
-    teal,
-    sky,
-    sapphire,
-    blue,
-    lavender,
-    text,
-    subtext1,
-    subtext0,
-    overlay2,
-    overlay1,
-    overlay0,
-    surface2,
-    surface1,
-    surface0,
-    base_solid,
-    mantle_solid,
-    crust_solid,
-    border_frame,
-    border_subtle,
-    border_focus,
-    terminal_bg,
-    terminal_header,
-    terminal_frame,
-    terminal_bracket,
-    item_active_bg,
-    item_hover_bg,
-    keycap_bg,
-    keycap_border,
-    search_glyph,
-);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_theme_config_strings() {
+    fn config_strings_are_case_insensitive() {
         assert_eq!(Theme::default(), Theme::Dark);
         assert_eq!(Theme::from_config_str("dark"), Some(Theme::Dark));
         assert_eq!(Theme::from_config_str("LIGHT"), Some(Theme::Light));
         assert_eq!(Theme::from_config_str("mocha"), None);
-        assert_eq!(Theme::Light.as_config_str(), "light");
     }
 
     #[test]
-    fn test_theme_delegates_to_palette() {
-        assert_eq!(Theme::Dark.text(), Macchiato::text());
-        assert_eq!(Theme::Dark.green(), rgb(0xa6da95));
-        assert_eq!(Theme::Dark.accent(), Macchiato::green());
-        assert_eq!(Theme::Dark.detail_text(), Macchiato::subtext0());
+    fn each_theme_selects_its_own_palette() {
+        let dark = Theme::Dark.palette();
+        let light = Theme::Light.palette();
 
-        assert_eq!(Theme::Light.text(), Latte::text());
-        assert_eq!(Theme::Light.terminal_bg(), Latte::base_solid());
-        assert_eq!(Theme::Light.terminal_header(), Latte::mantle_solid());
-        assert_eq!(Theme::Light.accent(), Latte::blue());
-        assert_eq!(Theme::Light.detail_text(), Latte::subtext1());
+        assert_eq!(dark.accent, rgb(0x00a6_da95));
+        assert_eq!(dark.detail_text, rgb(0x00a5_adcb));
+        assert_eq!(dark.hint, rgb(0x00a5_adcb));
+        assert_eq!(dark.placeholder, rgb(0x006e_738d));
+        assert_eq!(dark.bg, rgb(0x001b_1d2b));
+        assert_eq!(dark.header, rgb(0x0020_2233));
+
+        assert_eq!(light.accent, rgb(0x001e_66f5));
+        assert_eq!(light.detail_text, rgb(0x005c_5f77));
+        assert_eq!(light.hint, rgb(0x006c_6f85));
+        assert_eq!(light.placeholder, rgb(0x009c_a0b0));
+        assert_eq!(light.bg, rgb(0x00ef_f1f5));
+        assert_eq!(light.header, rgb(0x00e6_e9ef));
+
+        assert_ne!(dark.accent, light.accent);
     }
 }

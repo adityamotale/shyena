@@ -1,12 +1,24 @@
 #![windows_subsystem = "windows"]
 
-use std::{cell::RefCell, rc::Rc, sync::Arc, thread, time::Duration};
+//! Shyena: a global-hotkey launcher built on GPUI.
+//!
+//! The process starts at login and stays alive behind a hidden anchor window.
+//! A hotkey thread opens the search bar, the UI resolves a query into an app,
+//! PowerShell function, or in-process command, and worker-thread failures are
+//! delivered back through an async channel for display in the same window.
+
 use async_channel::{Receiver, Sender};
 use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey, Modifiers},
 };
-use gpui::*;
+use gpui::{
+    App, AppContext, Application, Bounds, Context, Div, FocusHandle, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, Result, Rgba, Styled,
+    Subscription, Timer, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, div, point, px, size,
+};
+use std::{cell::RefCell, rc::Rc, sync::Arc, thread, time::Duration};
 
 mod commands;
 mod config;
@@ -14,12 +26,14 @@ mod exec;
 mod theme;
 use commands::InternalCommand;
 use config::{ConfigStore, ReloadOutcome};
-use theme::Theme;
+use theme::{Palette, Theme};
 
 const WIN_WIDTH: f32 = 660.0;
 const BAR_HEIGHT: f32 = 62.0;
 const ITEM_HEIGHT: f32 = 32.0;
 const MAX_VISIBLE_ITEMS: usize = 6;
+/// One-line cap for every error rendered in the 62 px panel.
+pub(crate) const ERROR_LINE_MAX_CHARS: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionKind {
@@ -28,7 +42,9 @@ pub enum ActionKind {
     Internal,
 }
 
-#[derive(Clone, Debug)]
+/// One resolvable entry in the candidate list (app, PowerShell function, or
+/// built-in command). Kept `Clone` because the render closure owns a copy.
+#[derive(Clone)]
 pub struct CandidateAction {
     pub key: String,
     pub kind: ActionKind,
@@ -72,19 +88,23 @@ fn split_scope(input: &str) -> Option<(Scope, &str)> {
     Some((scope, &trimmed[ch.len_utf8()..]))
 }
 
+/// Win32 window styling and process-memory housekeeping.
+///
+/// All FFI calls here are best-effort: a failure must never prevent the
+/// launcher from opening, so results are deliberately discarded.
 mod platform {
     use gpui::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWCP_DONOTROUND,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmExtendFrameIntoClientArea,
+        DwmSetWindowAttribute,
     };
     use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
     use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
     };
 
     pub fn setup_window(window: &Window) {
@@ -98,23 +118,28 @@ mod platform {
 
         let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
 
-        // Extend 1px frame into client area to activate Windows DWM hardware drop shadow
+        // A 1px extended frame lets DWM draw its hardware drop shadow around
+        // an otherwise borderless popup.
         let margins = MARGINS {
             cxLeftWidth: 1,
             cxRightWidth: 1,
             cyTopHeight: 1,
             cyBottomHeight: 1,
         };
-        let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+        // SAFETY: `hwnd` is the live window handle provided by GPUI and
+        // `margins` is a valid initialized struct passed by pointer.
+        let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &raw const margins) };
 
-        // Authentic sharp TUI window geometry (0px corner radius)
+        // Square corners match the terminal aesthetic of the UI.
         let corner_pref = DWMWCP_DONOTROUND;
+        // SAFETY: the pointer and byte count describe the live `corner_pref`
+        // value and match the DWMWA_WINDOW_CORNER_PREFERENCE attribute type.
         let _ = unsafe {
             DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_WINDOW_CORNER_PREFERENCE,
-                &corner_pref as *const _ as *const std::ffi::c_void,
-                std::mem::size_of_val(&corner_pref) as u32,
+                (&raw const corner_pref).cast::<std::ffi::c_void>(),
+                u32::try_from(std::mem::size_of_val(&corner_pref)).unwrap_or(u32::MAX),
             )
         };
     }
@@ -129,6 +154,8 @@ mod platform {
         };
 
         let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
+        // SAFETY: `hwnd` is the live window handle supplied by GPUI. The flags
+        // leave geometry untouched, so no invalid size/position is passed.
         unsafe {
             let res = SetWindowPos(
                 hwnd,
@@ -148,6 +175,8 @@ mod platform {
     /// lowers the working set only: committed memory and GPU allocations stay
     /// resident, and the pages fault back in when the launcher next opens.
     pub fn trim_working_set() {
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle that requires no
+        // closing; `K32EmptyWorkingSet` only touches this process's pages.
         unsafe {
             let _ = K32EmptyWorkingSet(GetCurrentProcess());
         }
@@ -172,14 +201,14 @@ fn schedule_trim(
     .detach();
 }
 
-#[derive(Clone, Debug)]
+/// A PowerShell failure delivered from a worker thread to the UI channel.
+#[derive(Clone)]
 pub struct PsError {
     pub message: String,
 }
 
 /// Runtime failures are dismissible with [Esc]; config failures are fatal for
 /// the current launcher session and close the window on [Esc] instead.
-#[derive(Clone, Debug, PartialEq, Eq)]
 enum ErrorState {
     Runtime(String),
     Config(String),
@@ -197,7 +226,7 @@ impl ErrorState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum CommandTarget {
     App {
         key: String,
@@ -389,12 +418,7 @@ impl SearchBar {
         if trimmed.is_empty() {
             self.filtered_actions.clear();
             self.selected_index = 0;
-            let target_height = px(BAR_HEIGHT);
-            let current_size = window.bounds().size;
-            let diff: f32 = (current_size.height - target_height).into();
-            if diff.abs() > 0.5 {
-                window.resize(size(current_size.width, target_height));
-            }
+            Self::resize_to_height(window, BAR_HEIGHT);
             return;
         }
 
@@ -404,7 +428,7 @@ impl SearchBar {
         if !self.config.suggestions.enabled() {
             self.filtered_actions.clear();
             self.selected_index = 0;
-            self.resize_to_bar(window);
+            Self::resize_to_height(window, BAR_HEIGHT);
             return;
         }
 
@@ -462,10 +486,17 @@ impl SearchBar {
         candidates.sort_by(|a, b| {
             let a_exact = a.key.eq_ignore_ascii_case(target_token);
             let b_exact = b.key.eq_ignore_ascii_case(target_token);
-            let a_prefix = a.key.to_lowercase().starts_with(&target_token.to_lowercase());
-            let b_prefix = b.key.to_lowercase().starts_with(&target_token.to_lowercase());
+            let a_prefix = a
+                .key
+                .to_lowercase()
+                .starts_with(&target_token.to_lowercase());
+            let b_prefix = b
+                .key
+                .to_lowercase()
+                .starts_with(&target_token.to_lowercase());
 
-            b_exact.cmp(&a_exact)
+            b_exact
+                .cmp(&a_exact)
                 .then_with(|| b_prefix.cmp(&a_prefix))
                 .then_with(|| a.key.cmp(&b.key))
         });
@@ -477,38 +508,30 @@ impl SearchBar {
 
         let visible_items = self.filtered_actions.len().min(MAX_VISIBLE_ITEMS);
         let list_height = if visible_items > 0 {
-            (visible_items as f32) * ITEM_HEIGHT + 1.0
+            f32::from(u8::try_from(visible_items).unwrap_or(u8::MAX)) * ITEM_HEIGHT + 1.0
         } else {
             0.0
         };
-        let target_height = px(BAR_HEIGHT + list_height);
-        let current_size = window.bounds().size;
-        let diff: f32 = (current_size.height - target_height).into();
+        Self::resize_to_height(window, BAR_HEIGHT + list_height);
+    }
+
+    /// Resizes only when the change is visible, so typing within the same
+    /// candidate count does not trigger a window resize on every keystroke.
+    fn resize_to_height(window: &mut Window, height: f32) {
+        let target = px(height);
+        let current = window.bounds().size;
+        let diff: f32 = (current.height - target).into();
         if diff.abs() > 0.5 {
-            window.resize(size(current_size.width, target_height));
+            window.resize(size(current.width, target));
         }
     }
 
-    fn resize_to_bar(&self, window: &mut Window) {
-        let current_size = window.bounds().size;
-        let target_height = px(BAR_HEIGHT);
-        let diff: f32 = (current_size.height - target_height).into();
-        if diff.abs() > 0.5 {
-            window.resize(size(current_size.width, target_height));
-        }
-    }
-
-    fn set_error(
-        &mut self,
-        error: ErrorState,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_error(&mut self, error: ErrorState, window: &mut Window, cx: &mut Context<Self>) {
         self.error = Some(error);
         self.query.clear();
         self.filtered_actions.clear();
         self.selected_index = 0;
-        self.resize_to_bar(window);
+        Self::resize_to_height(window, BAR_HEIGHT);
         self.focus_handle.focus(window);
         cx.notify();
     }
@@ -767,330 +790,330 @@ impl SearchBar {
     }
 }
 
+impl ActionKind {
+    /// Short badge and colour used in the candidate list.
+    fn badge(self, palette: Palette) -> (&'static str, Rgba) {
+        match self {
+            Self::App => ("APP", palette.accent),
+            Self::Ps => ("PS", palette.ps),
+            Self::Internal => ("SYS", palette.internal),
+        }
+    }
+
+    /// Longer tag used in the input row when no candidate is selected.
+    fn mode_tag(self, palette: Palette) -> (&'static str, Rgba) {
+        match self {
+            Self::App => ("LAUNCH", palette.accent),
+            Self::Ps => ("EXEC", palette.ps),
+            Self::Internal => ("SYSTEM", palette.internal),
+        }
+    }
+}
+
+impl From<Scope> for ActionKind {
+    fn from(scope: Scope) -> Self {
+        match scope {
+            Scope::App => Self::App,
+            Scope::Ps => Self::Ps,
+            Scope::Internal => Self::Internal,
+        }
+    }
+}
+
 impl Render for SearchBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let trimmed = self.query.trim();
-        let first_token = trimmed.split_whitespace().next().unwrap_or("");
+        let palette = self.theme.palette();
+        let root = self.root_element(palette, cx);
 
-        let mode_tag = if trimmed.is_empty() {
-            None
-        } else if let Some((scope, _)) = split_scope(trimmed) {
-            Some(match scope {
-                Scope::App => ("LAUNCH", theme.accent()),
-                Scope::Ps => ("EXEC", theme.peach()),
-                Scope::Internal => ("SYSTEM", theme.blue()),
-            })
-        } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
-            match selected.kind {
-                ActionKind::App => Some(("LAUNCH", theme.accent())),
-                ActionKind::Ps => Some(("EXEC", theme.peach())),
-                ActionKind::Internal => Some(("SYSTEM", theme.blue())),
-            }
-        } else if self.config.apps.contains_key(first_token) {
-            Some(("LAUNCH", theme.accent()))
-        } else {
-            Some(("EXEC", theme.peach()))
-        };
+        if let Some(error) = &self.error {
+            return Self::render_error(root, error, palette);
+        }
 
-        let root = div()
+        let mode_tag = self.mode_tag(palette);
+        root.child(Self::render_header(palette))
+            .child(self.render_input(palette, mode_tag))
+            .children(self.render_suggestions(palette, cx))
+    }
+}
+
+impl SearchBar {
+    fn root_element(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        div()
             .track_focus(&self.focus_handle)
             .key_context("terminal_bar")
             .on_key_down(cx.listener(|this, event, window, cx| {
-                Self::handle_key(this, event, window, cx)
+                Self::handle_key(this, event, window, cx);
             }))
             .size_full()
             .flex()
             .flex_col()
             .font_family("GeistMono Nerd Font Mono")
-            .bg(theme.terminal_bg())
+            .bg(palette.bg)
             .rounded(px(0.0))
             .border_1()
             .border_color(if self.error.is_some() {
-                theme.red()
+                palette.error
             } else {
-                theme.terminal_frame()
+                palette.frame
             })
-            .overflow_hidden();
+            .overflow_hidden()
+    }
 
-        // Error state replaces the search bar entirely; [Esc] returns to an
-        // empty bar in the same window.
-        if let Some(error) = &self.error {
-            let message = error.message().to_string();
-            let label = if error.is_config() {
-                "shyena::config_error"
-            } else {
-                "shyena::error"
-            };
-            let esc_hint = if error.is_config() {
-                "[ ESC: close ]"
-            } else {
-                "[ ESC: continue ]"
-            };
+    fn mode_tag(&self, palette: Palette) -> Option<(&'static str, Rgba)> {
+        let trimmed = self.query.trim();
+        if trimmed.is_empty() {
+            None
+        } else if let Some((scope, _)) = split_scope(trimmed) {
+            Some(ActionKind::from(scope).mode_tag(palette))
+        } else if let Some(selected) = self.filtered_actions.get(self.selected_index) {
+            Some(selected.kind.mode_tag(palette))
+        } else if self
+            .config
+            .apps
+            .contains_key(trimmed.split_whitespace().next().unwrap_or(""))
+        {
+            Some(ActionKind::App.mode_tag(palette))
+        } else {
+            Some(ActionKind::Ps.mode_tag(palette))
+        }
+    }
 
-            return root
+    /// Error state replaces the search bar entirely; [Esc] dismisses a runtime
+    /// error or closes the window for a fatal config error.
+    fn render_error(root: Div, error: &ErrorState, palette: Palette) -> Div {
+        let label = if error.is_config() {
+            "shyena::config_error"
+        } else {
+            "shyena::error"
+        };
+        let esc_hint = if error.is_config() {
+            "[ ESC: close ]"
+        } else {
+            "[ ESC: continue ]"
+        };
+
+        root.child(
+            div()
+                .h(px(20.0))
+                .px(px(10.0))
+                .bg(palette.header)
+                .border_b_1()
+                .border_color(palette.error)
+                .flex()
+                .items_center()
+                .justify_between()
+                .text_size(px(10.5))
                 .child(
                     div()
-                        .h(px(20.0))
-                        .px(px(10.0))
-                        .bg(theme.terminal_header())
-                        .border_b_1()
-                        .border_color(theme.red())
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(div().text_color(palette.error).child("┌─["))
+                        .child(div().text_color(palette.error).child(label))
+                        .child(div().text_color(palette.error).child("]")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(div().text_color(palette.hint).child(esc_hint))
+                        .child(div().text_color(palette.error).child("─┐")),
+                ),
+        )
+        .child(
+            div()
+                .h(px(BAR_HEIGHT - 20.0))
+                .flex()
+                .items_center()
+                .px(px(12.0))
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_color(palette.error)
+                        .text_size(px(14.0))
+                        .child("✗"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(palette.text)
+                        .text_size(px(12.5))
+                        .child(error.message().to_string()),
+                ),
+        )
+    }
+
+    fn render_header(palette: Palette) -> Div {
+        div()
+            .h(px(20.0))
+            .px(px(10.0))
+            .bg(palette.header)
+            .border_b_1()
+            .border_color(palette.border_subtle)
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(10.5))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(div().text_color(palette.bracket).child("┌─["))
+                    .child(div().text_color(palette.accent).child("shyena::cli"))
+                    .child(div().text_color(palette.bracket).child("]")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(div().text_color(palette.hint).child("[ ESC: exit ]"))
+                    .child(div().text_color(palette.bracket).child("─┐")),
+            )
+    }
+
+    fn render_input(&self, palette: Palette, mode_tag: Option<(&'static str, Rgba)>) -> Div {
+        div()
+            .h(px(BAR_HEIGHT - 20.0))
+            .flex()
+            .items_center()
+            .px(px(12.0))
+            .child(
+                div()
+                    .mr(px(10.0))
+                    .flex()
+                    .items_center()
+                    .text_color(palette.accent)
+                    .text_size(px(14.0))
+                    .child("❯"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.5))
+                    .child(if self.query.is_empty() {
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_color(palette.placeholder)
+                                    .child("@ apps, # commands, : system..."),
+                            )
+                            .child(div().ml(px(2.0)).text_color(palette.accent).child("█"))
+                    } else {
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(div().text_color(palette.text).child(self.query.clone()))
+                            .child(div().ml(px(2.0)).text_color(palette.accent).child("█"))
+                    }),
+            )
+            .children(mode_tag.map(|(label, color)| {
+                div()
+                    .px(px(6.0))
+                    .py(px(1.5))
+                    .rounded(px(0.0))
+                    .bg(palette.surface0)
+                    .border_1()
+                    .border_color(palette.surface1)
+                    .text_color(color)
+                    .text_size(px(10.5))
+                    .child(format!("[ {label} ]"))
+            }))
+    }
+
+    fn render_suggestions(&self, palette: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.config.suggestions.enabled() || self.filtered_actions.is_empty() {
+            return None;
+        }
+
+        let selected_idx = self.selected_index;
+        let items = self
+            .filtered_actions
+            .iter()
+            .take(MAX_VISIBLE_ITEMS)
+            .enumerate();
+
+        Some(
+            div()
+                .w_full()
+                .border_t_1()
+                .border_color(palette.border_subtle)
+                .flex()
+                .flex_col()
+                .children(items.map(|(idx, item)| {
+                    let is_selected = idx == selected_idx;
+                    let (badge, badge_color) = item.kind.badge(palette);
+                    let action = item.clone();
+
+                    div()
+                        .h(px(ITEM_HEIGHT))
+                        .px(px(12.0))
                         .flex()
                         .items_center()
                         .justify_between()
-                        .text_size(px(10.5))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .child(div().text_color(theme.red()).child("┌─["))
-                                .child(div().text_color(theme.red()).child(label.to_string()))
-                                .child(div().text_color(theme.red()).child("]")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .child(
-                                    div()
-                                        .text_color(theme.subtext0())
-                                        .child(esc_hint.to_string()),
-                                )
-                                .child(div().text_color(theme.red()).child("─┐")),
-                        ),
-                )
-                .child(
-                    div()
-                        .h(px(BAR_HEIGHT - 20.0))
-                        .flex()
-                        .items_center()
-                        .px(px(12.0))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .text_color(theme.red())
-                                .text_size(px(14.0))
-                                .child("✗"),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(theme.text())
-                                .text_size(px(12.5))
-                                .child(message),
-                        ),
-                );
-        }
-
-        root
-            // Top ASCII TUI header bracket
-            .child(
-                div()
-                    .h(px(20.0))
-                    .px(px(10.0))
-                    .bg(theme.terminal_header())
-                    .border_b_1()
-                    .border_color(theme.border_subtle())
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(10.5))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_color(theme.terminal_bracket())
-                                    .child("┌─["),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.accent())
-                                    .child("shyena::cli"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.terminal_bracket())
-                                    .child("]"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_color(theme.subtext0())
-                                    .child("[ ESC: exit ]"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.terminal_bracket())
-                                    .child("─┐"),
-                            ),
-                    ),
-            )
-            // Input stream with leading prompt and solid terminal block cursor
-            .child(
-                div()
-                    .h(px(BAR_HEIGHT - 20.0))
-                    .flex()
-                    .items_center()
-                    .px(px(12.0))
-                    .child(
-                        div()
-                            .mr(px(10.0))
-                            .flex()
-                            .items_center()
-                            .text_color(theme.accent())
-                            .text_size(px(14.0))
-                            .child("❯"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .text_size(px(13.5))
-                            .child(if self.query.is_empty() {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_color(theme.overlay0())
-                                            .child("@ apps, # commands, : system..."),
-                                    )
-                                    .child(
-                                        div()
-                                            .ml(px(2.0))
-                                            .text_color(theme.accent())
-                                            .child("█"),
-                                    )
-                            } else {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_color(theme.text())
-                                            .child(self.query.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .ml(px(2.0))
-                                            .text_color(theme.accent())
-                                            .child("█"),
-                                    )
+                        .text_size(px(12.0))
+                        .bg(if is_selected {
+                            palette.surface0
+                        } else {
+                            palette.bg
+                        })
+                        .hover(|style| style.bg(palette.surface0))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.activate(&action, &[], window, cx);
                             }),
-                    )
-                    // Sharp bracketed action tag
-                    .children(mode_tag.map(|(label, color)| {
-                        div()
-                            .px(px(6.0))
-                            .py(px(1.5))
-                            .rounded(px(0.0))
-                            .bg(theme.surface0())
-                            .border_1()
-                            .border_color(theme.surface1())
-                            .text_color(color)
-                            .text_size(px(10.5))
-                            .child(format!("[ {} ]", label))
-                    })),
-            )
-            .children(if self.config.suggestions.enabled() && !self.filtered_actions.is_empty() {
-                let selected_idx = self.selected_index;
-                let visible_items = self.filtered_actions.iter().take(MAX_VISIBLE_ITEMS).enumerate();
-
-                Some(
-                    div()
-                        .w_full()
-                        .border_t_1()
-                        .border_color(theme.border_subtle())
-                        .flex()
-                        .flex_col()
-                        .children(visible_items.map(|(idx, item)| {
-                            let is_selected = idx == selected_idx;
-                            let (badge_text, badge_color) = match item.kind {
-                                ActionKind::App => ("APP", theme.accent()),
-                                ActionKind::Ps => ("PS", theme.peach()),
-                                ActionKind::Internal => ("SYS", theme.blue()),
-                            };
-                            let action_item = item.clone();
-
+                        )
+                        .child(
                             div()
-                                .h(px(ITEM_HEIGHT))
-                                .px(px(12.0))
                                 .flex()
                                 .items_center()
-                                .justify_between()
-                                .text_size(px(12.0))
-                                .bg(if is_selected {
-                                    theme.surface0()
-                                } else {
-                                    theme.terminal_bg()
-                                })
-                                .hover(|style| style.bg(theme.surface0()))
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        this.activate(&action_item, &[], window, cx);
-                                    }),
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .px(px(4.0))
+                                        .py(px(1.0))
+                                        .bg(palette.surface1)
+                                        .border_1()
+                                        .border_color(palette.border_subtle)
+                                        .text_color(badge_color)
+                                        .text_size(px(9.5))
+                                        .child(badge),
                                 )
                                 .child(
                                     div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .px(px(4.0))
-                                                .py(px(1.0))
-                                                .bg(theme.surface1())
-                                                .border_1()
-                                                .border_color(theme.border_subtle())
-                                                .text_color(badge_color)
-                                                .text_size(px(9.5))
-                                                .child(badge_text),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(if is_selected {
-                                                    theme.accent()
-                                                } else {
-                                                    theme.text()
-                                                })
-                                                .child(item.key.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(theme.detail_text())
-                                        .text_size(px(11.0))
-                                        .child(item.detail.clone()),
-                                )
-                        })),
-                )
-            } else {
-                None
-            })
+                                        .text_color(if is_selected {
+                                            palette.accent
+                                        } else {
+                                            palette.text
+                                        })
+                                        .child(item.key.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_color(palette.detail_text)
+                                .text_size(px(11.0))
+                                .child(item.detail.clone()),
+                        )
+                })),
+        )
     }
 }
 
-
-
+/// Opens the launcher, retrying a previously failed config load on the way in.
 fn open_search_window(
     cx: &mut App,
-    active_window: Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
+    active_window: &Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     ps_error_tx: Sender<PsError>,
-    store: Rc<RefCell<ConfigStore>>,
+    store: &Rc<RefCell<ConfigStore>>,
 ) -> WindowHandle<SearchBar> {
     // Healthy opens are pure memory. Retry the load only when the cached one
     // failed, so a repaired config recovers on the next hotkey press.
@@ -1155,38 +1178,32 @@ fn toggle_search_window(
     cx: &mut App,
     active_window: &Rc<RefCell<Option<WindowHandle<SearchBar>>>>,
     ps_error_tx: &Sender<PsError>,
-    store: Rc<RefCell<ConfigStore>>,
+    store: &Rc<RefCell<ConfigStore>>,
 ) {
-    let mut win_ref = active_window.borrow_mut();
-    let mut was_open = false;
-
-    if let Some(handle) = win_ref.as_ref() {
-        was_open = handle
-            .update(cx, |_, window, _| {
-                window.remove_window();
-            })
-            .is_ok();
-    }
-
-    *win_ref = None;
+    let opened = active_window.borrow_mut().take();
+    let was_open = opened.is_some_and(|handle| {
+        handle
+            .update(cx, |_, window, _| window.remove_window())
+            .is_ok()
+    });
 
     if was_open {
         schedule_trim(cx, active_window, Duration::from_millis(200));
-    }
-
-    if !was_open {
-        drop(win_ref);
-        let handle = open_search_window(cx, active_window.clone(), ps_error_tx.clone(), store);
+    } else {
+        let handle = open_search_window(cx, active_window, ps_error_tx.clone(), store);
         *active_window.borrow_mut() = Some(handle);
     }
 }
 
+/// Registers Alt+Backquote and forwards presses to the UI channel from a
+/// dedicated thread. The manager must be kept alive for the process lifetime.
 fn setup_global_hotkey(tx: Sender<()>) -> GlobalHotKeyManager {
     let manager = GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
-    // Register Alt + Backquote (tilde key)
     let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Backquote);
     let hotkey_id = hotkey.id();
-    manager.register(hotkey).expect("Failed to register Alt+Backquote global hotkey");
+    manager
+        .register(hotkey)
+        .expect("Failed to register Alt+Backquote global hotkey");
 
     let event_receiver = GlobalHotKeyEvent::receiver().clone();
     thread::spawn(move || {
@@ -1205,11 +1222,9 @@ fn main() {
 
     app.run(|cx: &mut App| {
         cx.text_system()
-            .add_fonts(vec![
-                std::borrow::Cow::Borrowed(include_bytes!(
-                    "../assets/fonts/GeistMonoNerdFontMono-Regular.otf"
-                )),
-            ])
+            .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
+                "../assets/fonts/GeistMonoNerdFontMono-Regular.otf"
+            ))])
             .expect("Failed to register GeistMono Nerd Font");
 
         // The launcher is long-running (started at login), so the config is
@@ -1261,19 +1276,13 @@ fn main() {
                 let store = error_config_store.clone();
                 let message = err.message;
                 let _ = cx.update(move |cx| {
-                    let handle = active.borrow().as_ref().cloned();
-                    let handle = match handle {
-                        Some(handle) => handle,
-                        None => {
-                            let handle = open_search_window(
-                                cx,
-                                active.clone(),
-                                ps_error_tx.clone(),
-                                store.clone(),
-                            );
-                            *active.borrow_mut() = Some(handle);
-                            handle
-                        }
+                    let handle = active.borrow().as_ref().copied();
+                    let handle = if let Some(handle) = handle {
+                        handle
+                    } else {
+                        let handle = open_search_window(cx, &active, ps_error_tx.clone(), &store);
+                        *active.borrow_mut() = Some(handle);
+                        handle
                     };
 
                     if handle
@@ -1282,7 +1291,7 @@ fn main() {
                         })
                         .is_err()
                     {
-                        let handle = open_search_window(cx, active.clone(), ps_error_tx, store);
+                        let handle = open_search_window(cx, &active, ps_error_tx, &store);
                         *active.borrow_mut() = Some(handle);
                         let _ = handle.update(cx, |bar, window, cx| {
                             bar.show_error(message, window, cx);
@@ -1304,7 +1313,7 @@ fn main() {
                 let ps_error_tx = ps_err_tx_clone.clone();
                 let store = hotkey_config_store.clone();
                 let _ = cx.update(move |cx| {
-                    toggle_search_window(cx, &active, &ps_error_tx, store);
+                    toggle_search_window(cx, &active, &ps_error_tx, &store);
                 });
             }
         })
