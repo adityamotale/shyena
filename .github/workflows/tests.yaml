@@ -1,0 +1,60 @@
+name: Unit Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x86_64
+          - os: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: "-D warnings"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          cache: false
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy check
+        run: cargo clippy --all-targets --all-features --release -- -D warnings
+
+      - name: Cargo check (lib)
+        run: cargo check --release --all-features
+
+      - name: Cargo check (tests)
+        run: cargo check --tests --release --all-features
+
+      - name: Run tests (debug)
+        run: cargo test --all-targets --all-features -- --nocapture
+
+      - name: Run tests (release)
+        run: cargo test --release --all-targets --all-features -- --nocapture
