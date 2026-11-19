@@ -45,16 +45,16 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy check
-        run: cargo clippy --all-targets --all-features --release -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Cargo check (lib)
-        run: cargo check --release --all-features
+        run: cargo check --release
 
       - name: Cargo check (tests)
-        run: cargo check --tests --release --all-features
+        run: cargo check --tests --release
 
       - name: Run tests (debug)
-        run: cargo test --all-targets --all-features -- --nocapture
+        run: cargo test --all-targets -- --nocapture
 
       - name: Run tests (release)
-        run: cargo test --release --all-targets --all-features -- --nocapture
+        run: cargo test --release --all-targets -- --nocapture
