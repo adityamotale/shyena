@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="280" viewBox="0 0 1200 280" role="img" aria-labelledby="title desc">
+  <title id="title">shyena — a keyboard-first launcher for Windows</title>
+  <desc id="desc">Catppuccin Latte themed banner with the shyena wordmark, a blinking-cursor motif, and the Latte colour palette.</desc>
+
+  <!-- Latte base -->
+  <rect width="1200" height="280" fill="#eff1f5"/>
+
+  <!-- Square frame, echoing the launcher's square corners -->
+  <rect x="16" y="16" width="1168" height="248" fill="none" stroke="#acb0be" stroke-width="2"/>
+  <rect x="16" y="16" width="232" height="6" fill="#1e66f5"/>
+  <rect x="248" y="16" width="88" height="6" fill="#40a02b"/>
+
+  <!-- Hotkey pill -->
+  <text x="64" y="74" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" letter-spacing="2" fill="#8839ef">[ ALT + &#96; ]</text>
+
+  <!-- Wordmark and cursor block -->
+  <text x="62" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="92" font-weight="700" fill="#1e66f5">shyena</text>
+  <rect x="403" y="95" width="22" height="62" fill="#40a02b"/>
+
+  <!-- Tagline -->
+  <text x="65" y="204" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="25" fill="#4c4f69">a keyboard-first launcher for Windows</text>
+  <text x="66" y="236" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" letter-spacing="2" fill="#6c6f85">RUST  ·  GPUI  ·  POWERSHELL</text>
+
+  <!-- Latte palette swatches -->
+  <text x="930" y="76" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" letter-spacing="2" fill="#4c4f69">CATPPUCCIN LATTE</text>
+  <g>
+    <rect x="930" y="94" width="28" height="28" fill="#dc8a78"/>
+    <rect x="968" y="94" width="28" height="28" fill="#dd7878"/>
+    <rect x="1006" y="94" width="28" height="28" fill="#ea76cb"/>
+    <rect x="1044" y="94" width="28" height="28" fill="#8839ef"/>
+    <rect x="1082" y="94" width="28" height="28" fill="#d20f39"/>
+    <rect x="1120" y="94" width="28" height="28" fill="#e64553"/>
+    <rect x="930" y="132" width="28" height="28" fill="#fe640b"/>
+    <rect x="968" y="132" width="28" height="28" fill="#df8e1d"/>
+    <rect x="1006" y="132" width="28" height="28" fill="#40a02b"/>
+    <rect x="1044" y="132" width="28" height="28" fill="#179299"/>
+    <rect x="1082" y="132" width="28" height="28" fill="#04a5e5"/>
+    <rect x="1120" y="132" width="28" height="28" fill="#1e66f5"/>
+  </g>
+  <text x="930" y="188" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#6c6f85">soothing pastel palette</text>
+</svg>
