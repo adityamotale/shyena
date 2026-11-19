@@ -152,9 +152,9 @@ template `install.ps1` copies to `~/.config/.shyena`; the binary never creates i
 Validation is strict at the top level: unknown tokens (`app`, `ps`, `config`, ...), stray
 characters (`@`, `;`, `$`, `=`, digit-leading identifiers), unterminated block comments
 and trailing junk all produce line/column diagnostics. Omitted directives fall back to
-`Config::default()` (dark theme, suggestions on). The `# shyena:v1` header is
-informational — the scanner treats it as a comment, so older header-less files remain
-valid.
+`Config::default()` (dark theme, suggestions on). A legacy `# shyena:v1` header, if
+present, is informational — the scanner treats it as a comment, so files with or
+without it remain valid.
 
 ### File I/O
 

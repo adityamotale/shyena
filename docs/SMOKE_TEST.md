@@ -25,9 +25,9 @@ your build when testing configuration reload.
 1. Type `@calc` — the candidate list narrows to the registered app.
 2. Press **Tab** — the query is completed and the scope prefix is preserved.
 3. Press **Enter** — Calculator starts and the launcher closes.
-4. Reopen, type `#brightness 50`, press **Enter** — screen brightness changes;
-   no error panel appears.
-5. Reopen, type `#brightness` with no argument and press **Enter** — the
+4. Reopen, type `#volume 40`, press **Enter** — system volume changes; no error
+   panel appears.
+5. Reopen, type `#volume` with no argument and press **Enter** — the
    mandatory-parameter error appears in a single line. Press **Esc** — the
    launcher returns to an empty bar rather than closing.
 

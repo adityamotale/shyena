@@ -210,18 +210,26 @@ function brightness {
 
         assert_eq!(cfg.theme, Theme::Dark);
         assert_eq!(cfg.suggestions, Suggestions::On);
-        assert_eq!(cfg.apps.len(), 2);
+        assert_eq!(cfg.apps.len(), 4);
 
-        let notepad = cfg.apps.get("notepad").expect("notepad exists");
+        let terminal = cfg.apps.get("terminal").expect("terminal exists");
+        assert_eq!(terminal.path, PathBuf::from("wt.exe"));
+        assert_eq!(terminal.args, Vec::<String>::new());
+
+        let files = cfg.apps.get("files").expect("files exists");
+        assert_eq!(files.path, PathBuf::from(r"C:\Windows\explorer.exe"));
+        assert_eq!(files.args, Vec::<String>::new());
+
+        let calc = cfg.apps.get("calc").expect("calc exists");
+        assert_eq!(calc.path, PathBuf::from(r"C:\Windows\System32\calc.exe"));
+        assert_eq!(calc.args, Vec::<String>::new());
+
+        let taskmgr = cfg.apps.get("taskmgr").expect("taskmgr exists");
         assert_eq!(
-            notepad.path,
-            PathBuf::from(r"C:\Windows\System32\notepad.exe")
+            taskmgr.path,
+            PathBuf::from(r"C:\Windows\System32\Taskmgr.exe")
         );
-        assert_eq!(notepad.args, Vec::<String>::new());
-
-        let explorer = cfg.apps.get("explorer").expect("explorer exists");
-        assert_eq!(explorer.path, PathBuf::from(r"C:\Windows\explorer.exe"));
-        assert_eq!(explorer.args, Vec::<String>::new());
+        assert_eq!(taskmgr.args, Vec::<String>::new());
     }
 
     #[test]
@@ -232,16 +240,19 @@ function brightness {
         let cfg = Config::from_ast(&ast);
 
         let expected = [
-            "brightness",
+            "lock",
+            "standby",
             "volume",
             "volume-up",
             "volume-down",
             "mute",
-            "lock",
-            "power-off",
-            "power-restart",
-            "power-signout",
-            "power-suspend",
+            "setclip",
+            "uuid",
+            "stamp",
+            "flushdns",
+            "hash",
+            "killproc",
+            "open",
         ];
         assert_eq!(cfg.ps.len(), expected.len());
         for name in expected {
@@ -250,43 +261,39 @@ function brightness {
     }
 
     #[test]
-    fn test_default_brightness_and_volume_require_explicit_level() {
+    fn test_default_volume_requires_explicit_level() {
         let ast = Scanner::new(Config::DEFAULT_SHYENA)
             .parse()
             .expect("default config parses");
         let cfg = Config::from_ast(&ast);
 
-        for name in ["brightness", "volume"] {
-            let action = cfg.ps.get(name).expect("function exists");
-            assert!(
-                action.body.contains("Parameter(Mandatory = $true)"),
-                "{name} has a mandatory parameter"
-            );
-            assert!(
-                action.body.contains("ValidateRange(0, 100)"),
-                "{name} validates the range"
-            );
-            assert!(!action.body.contains("$args["), "{name} uses a param block");
-        }
+        let action = cfg.ps.get("volume").expect("function exists");
+        assert!(
+            action.body.contains("Parameter(Mandatory = $true)"),
+            "volume has a mandatory parameter"
+        );
+        assert!(
+            action.body.contains("ValidateRange(0, 100)"),
+            "volume validates the range"
+        );
+        assert!(!action.body.contains("$args["), "volume uses a param block");
     }
 
     #[test]
-    fn test_default_brightness_uses_cim_method_invocation() {
+    fn test_default_volume_uses_core_audio_com() {
         let ast = Scanner::new(Config::DEFAULT_SHYENA)
             .parse()
             .expect("default config parses");
         let cfg = Config::from_ast(&ast);
-        let brightness = cfg.ps.get("brightness").expect("brightness exists");
+        let volume = cfg.ps.get("volume").expect("function exists");
 
         assert!(
-            brightness
-                .body
-                .contains("Invoke-CimMethod -InputObject $display -MethodName WmiSetBrightness"),
-            "brightness must invoke the WMI method via Invoke-CimMethod"
+            volume.body.contains("SetMasterVolumeLevelScalar"),
+            "volume must set the scalar master level through Core Audio"
         );
         assert!(
-            !brightness.body.contains(".WmiSetBrightness("),
-            "CimInstance objects do not support direct WMI method calls"
+            volume.body.contains("[ShyenaAudio]::SetVolume($Level)"),
+            "volume must invoke the compiled COM helper"
         );
     }
 

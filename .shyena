@@ -1,94 +1,105 @@
+# ~/.config/.shyena
+# Documentation: https://github.com/adityamotale/shyena
+#
+# This file is PowerShell. Comments are ignored; only declarations are read.
+# Reload after editing with :reload, or sign out and back in.
+#
+# PREFIXES
+#   @   registered application      @terminal
+#   #   PowerShell command          #volume 40
+#   :   built-in command            :reload
+#       no prefix                   search apps and commands together
+#
+# Arguments are forwarded as typed; quotes are not parsed. Commands change
+# state (clipboard, processes, settings) rather than print output.
+
+
 # =============================================================================
-# Shyena configuration
-#
-# This is the canonical config file: it is the template installed to
-# %USERPROFILE%\.config\.shyena by install.ps1, and it is the file read directly
-# by debug builds (cargo run) during development. Release builds read the
-# installed copy instead. After editing, run ":reload" from the launcher or
-# restart Shyena to apply changes.
-#
-# Scopes:  @  registered applications     #  PowerShell functions
-#          :  built-in system commands
-# Example: type "# brightness 60" and press Enter.
+# 1  BEHAVIOR
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# INTERNAL CONFIG
-# -----------------------------------------------------------------------------
-
-# Theme controls the palette: "dark" (Catppuccin Macchiato) or "light"
-# (Catppuccin Latte). Values are case-insensitive.
+# Palette: 'dark' = Catppuccin Macchiato, 'light' = Catppuccin Latte.
 Set-Theme 'dark'
 
-# Suggestions controls the candidate list: "on" shows it, "off" hides it.
-# With suggestions off, type an exact command key and press Enter.
+# Candidate list: 'on' = search as you type, 'off' = exact key + Enter only.
 Set-Suggestions 'on'
 
-# -----------------------------------------------------------------------------
-# APPLICATIONS (@)
-# -----------------------------------------------------------------------------
-# Syntax:  Register-App '<key>' @{
-#              Path = '<executable>'
-#              Args = @('<argument>'[, '<argument>'...])
-#          }
-# Arguments are static; dynamic tokens typed after the key are appended.
 
-# Open Windows Notepad
-Register-App 'notepad' @{
-    Path = 'C:\Windows\System32\notepad.exe'
+# =============================================================================
+# 2  APPLICATIONS                                                            @
+# =============================================================================
+# Register-App '<key>' @{
+#     Path = '<executable>'          # absolute path, or a name found on PATH
+#     Args = @('<static>', 'args')   # applied on every launch
+# }
+# Anything typed after the key is appended, so  @ files C:\dev  works.
+
+# Windows Terminal - a keyboard launcher's natural companion.
+# Requires Windows Terminal; swap in your own terminal if you prefer.
+Register-App 'terminal' @{
+    Path = 'wt.exe'
     Args = @()
 }
 
-# Open File Explorer
-Register-App 'explorer' @{
+# File Explorer - append a folder path to jump straight there.
+Register-App 'files' @{
     Path = 'C:\Windows\explorer.exe'
     Args = @()
 }
 
-# Example with static arguments (uncomment and adapt to your own files):
-# Register-App 'notes' @{
-#     Path = 'C:\Windows\System32\notepad.exe'
-#     Args = @('C:\Users\<you>\notes.txt')
-# }
-
-# -----------------------------------------------------------------------------
-# DISPLAY
-# -----------------------------------------------------------------------------
-
-# brightness <0-100> - set the internal display brightness.
-# Usage:  # brightness 60
-# Note:   Requires an internal laptop panel that exposes the WMI brightness
-#         methods. Desktop and external monitors are not supported.
-# -----------------------------------------------------------------------------
-function brightness {
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateRange(0, 100)]
-        [int]$Level
-    )
-
-    $displays = @(Get-CimInstance -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue)
-    if ($displays.Count -eq 0) {
-        throw 'No WMI-controllable display was found.'
-    }
-
-    foreach ($display in $displays) {
-        Invoke-CimMethod -InputObject $display -MethodName WmiSetBrightness -Arguments @{
-            Timeout = 1
-            Brightness = $Level
-        } | Out-Null
-    }
+# Calculator - arithmetic without leaving the keyboard.
+Register-App 'calc' @{
+    Path = 'C:\Windows\System32\calc.exe'
+    Args = @()
 }
 
-# -----------------------------------------------------------------------------
-# AUDIO
-# -----------------------------------------------------------------------------
+# Task Manager - faster than Ctrl+Shift+Esc when your hands are on the keys.
+Register-App 'taskmgr' @{
+    Path = 'C:\Windows\System32\Taskmgr.exe'
+    Args = @()
+}
 
-# volume <0-100> - set the system master volume.
-# Usage:  # volume 40
-# Note:   Uses the Windows Core Audio COM interface through an inline type
-#         definition; no additional software is required.
-# -----------------------------------------------------------------------------
+# Your editor, with flags applied on every launch:
+# Register-App 'code' @{
+#     Path = 'code.cmd'
+#     Args = @('--new-window')
+# }
+
+
+# =============================================================================
+# 3  SESSION                                                                #
+# =============================================================================
+
+# lock - lock the workstation immediately (Win+L equivalent).
+function lock { rundll32.exe user32.dll,LockWorkStation }
+
+# standby - sleep, keeping apps and unsaved work intact.
+function standby {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetSuspendState(
+        [System.Windows.Forms.PowerState]::Suspend, $false, $false
+    )
+}
+
+# Power-off / restart / sign-out are deliberately NOT enabled by default: a
+# single stray Enter must never destroy a session. To opt in, add a prompt:
+# function power-off {
+#     Add-Type -AssemblyName System.Windows.Forms
+#     $answer = [System.Windows.Forms.MessageBox]::Show(
+#         'Shut down now?', 'Shyena', 'YesNo', 'Warning'
+#     )
+#     if ($answer -eq 'Yes') { Stop-Computer }
+# }
+
+
+# =============================================================================
+# 4  MEDIA                                                                  #
+# =============================================================================
+# Up/down/mute use virtual-key events; no extra software required. Each
+# function runs in its own PowerShell process, so each repeats its Add-Type.
+# The Core Audio COM declarations in 'volume' must keep their vtable order.
+
+# volume <0-100> - set the master volume.                  e.g. # volume 40
 function volume {
     param(
         [Parameter(Mandatory = $true)]
@@ -170,8 +181,6 @@ public static class ShyenaAudio
 }
 
 # volume-up - raise the master volume by one step.
-# Usage:  # volume-up
-# -----------------------------------------------------------------------------
 function volume-up {
     Add-Type -TypeDefinition @'
 using System;
@@ -186,8 +195,6 @@ public static class ShyenaKey {
 }
 
 # volume-down - lower the master volume by one step.
-# Usage:  # volume-down
-# -----------------------------------------------------------------------------
 function volume-down {
     Add-Type -TypeDefinition @'
 using System;
@@ -202,8 +209,6 @@ public static class ShyenaKey {
 }
 
 # mute - toggle the system mute state.
-# Usage:  # mute
-# -----------------------------------------------------------------------------
 function mute {
     Add-Type -TypeDefinition @'
 using System;
@@ -217,40 +222,54 @@ public static class ShyenaKey {
     [ShyenaKey]::keybd_event(0xAD, 0, 2, [UIntPtr]::Zero)
 }
 
-# -----------------------------------------------------------------------------
-# SYSTEM
-# -----------------------------------------------------------------------------
 
-# lock - lock the workstation immediately.
-# Usage:  # lock
-# -----------------------------------------------------------------------------
-function lock { rundll32.exe user32.dll,LockWorkStation }
+# =============================================================================
+# 5  CLIPBOARD & TEXT                                                       #
+# =============================================================================
 
-# power-off - shut down the computer immediately.
-# Usage:  # power-off
-# Note:   There is no confirmation prompt.
-# -----------------------------------------------------------------------------
-function power-off { Stop-Computer }
+# setclip <text...> - copy typed text to the clipboard.
+# Words are joined with spaces:  # setclip hello world  copies "hello world".
+function setclip {
+    if ($args.Count -eq 0) { throw 'setclip: provide some text' }
+    Set-Clipboard -Value ($args -join ' ')
+}
 
-# power-restart - restart the computer immediately.
-# Usage:  # power-restart
-# Note:   There is no confirmation prompt.
-# -----------------------------------------------------------------------------
-function power-restart { Restart-Computer }
+# uuid - copy a fresh GUID to the clipboard (IDs, test data, config keys).
+function uuid { Set-Clipboard -Value ([guid]::NewGuid().ToString()) }
 
-# power-signout - sign out the current user immediately.
-# Usage:  # power-signout
-# Note:   Unsaved work in other applications may be lost.
-# -----------------------------------------------------------------------------
-function power-signout { shutdown /l }
+# stamp - copy the current local time to the clipboard (logs, file names).
+function stamp { Set-Clipboard -Value (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') }
 
-# power-suspend - put the computer to sleep.
-# Usage:  # power-suspend
-# Note:   Wake events remain enabled; no applications are force-closed.
-# -----------------------------------------------------------------------------
-function power-suspend {
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.Application]::SetSuspendState(
-        [System.Windows.Forms.PowerState]::Suspend, $false, $false
+
+# =============================================================================
+# 6  SYSTEM TOOLS                                                           #
+# =============================================================================
+
+# flushdns - clear the DNS resolver cache.
+function flushdns { ipconfig /flushdns }
+
+# hash <path> - copy a file's SHA-256 to the clipboard. Spaces in paths work.
+function hash {
+    if ($args.Count -eq 0) { throw 'hash: provide a file path' }
+    $path = $args -join ' '
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "hash: file not found: $path"
+    }
+    Set-Clipboard -Value ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant())
+}
+
+# killproc <name> - stop every process with that name. No confirmation prompt.
+function killproc {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Name
     )
+    Stop-Process -Name $Name -Force
+}
+
+# open <target> - open a URL, file, or folder with its default handler.
+function open {
+    if ($args.Count -eq 0) { throw 'open: provide a target' }
+    Start-Process -FilePath ($args -join ' ')
 }
