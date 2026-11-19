@@ -268,9 +268,11 @@ yes/no before each mutating action, and confirm once more with a final `Proceed?
 prompt before applying anything. Declining a core step (binary install, a missing
 config) aborts; declining an optional step (Path entry, autostart, launch) only skips
 that step. `-Yes` auto-accepts every default for unattended use; without it the
-scripts refuse to run when stdin is redirected. Exit codes are `0` success, `1`
-failure and `2` user-aborted. `-DryRun` prints the same plan with defaults applied
-but makes no changes and asks no questions.
+scripts refuse to run when stdin is redirected. Interactive runs wait for Enter
+before returning so a dedicated console window or tab stays open; exit codes are
+`0` success, `1` failure and `2` user-aborted, and apply to non-interactive runs.
+`-DryRun` prints the same plan with defaults applied but makes no changes and asks
+no questions.
 
 `install.ps1` is also the update path — re-running it replaces the binary:
 
