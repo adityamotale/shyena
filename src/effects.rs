@@ -25,6 +25,9 @@ pub(crate) trait LauncherEffects: Send + Sync {
 
     /// Asks Windows to evict idle pages from this process.
     fn trim_working_set(&self);
+
+    /// Starts the interactive updater in a visible PowerShell terminal.
+    fn spawn_updater(&self);
 }
 
 /// Shared handle used by the UI and the pumps.
@@ -65,5 +68,18 @@ impl LauncherEffects for SystemEffects {
 
     fn trim_working_set(&self) {
         platform::trim_working_set();
+    }
+
+    fn spawn_updater(&self) {
+        let current_ver = env!("CARGO_PKG_VERSION");
+        let script = format!(
+            "$CurrentVersion = '{current_ver}'; \
+             irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | iex"
+        );
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+        if let Err(err) = cmd.spawn() {
+            eprintln!("Failed to spawn updater: {err}");
+        }
     }
 }

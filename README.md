@@ -44,6 +44,14 @@ irm https://raw.githubusercontent.com/adityamotale/shyena/master/install.ps1 | i
 >
 > Administrative elevation is neither requested nor required
 
+## Update
+
+Update directly inside Shyena via `:update`, or run the updater in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | iex
+```
+
 ## Uninstall
 
 Run the uninstaller inside an interactive PowerShell console:
@@ -62,7 +70,7 @@ Trigger the launcher via <kbd>Alt</kbd> + <kbd>`</kbd>, then supply a routing pr
 |:------|:----------------------|:-----------------------------|
 | `@`   | Registered Executable | `@terminal`, `@files C:\dev` |
 | `#`   | PowerShell Function   | `# volume 40`, `# uuid`      |
-| `:`   | Internal Control      | `:reload`                    |
+| `:`   | Internal Control      | `:reload`, `:update`         |
 | None  | Universal Search      | `calc`, `stamp`              |
 
 Both compact (`@app`) and spaced (`@ app`) prefixes are valid.

@@ -8,6 +8,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InternalCommand {
     Reload,
+    Update,
 }
 
 /// Static metadata used for resolution and suggestion rendering.
@@ -17,11 +18,18 @@ pub struct CommandSpec {
     pub command: InternalCommand,
 }
 
-pub const COMMANDS: &[CommandSpec] = &[CommandSpec {
-    name: "reload",
-    description: "Reload .shyena from disk",
-    command: InternalCommand::Reload,
-}];
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "reload",
+        description: "Reload .shyena from disk",
+        command: InternalCommand::Reload,
+    },
+    CommandSpec {
+        name: "update",
+        description: "Check for updates and install via PowerShell",
+        command: InternalCommand::Update,
+    },
+];
 
 /// Resolves a command name case-insensitively.
 pub fn find(name: &str) -> Option<&'static CommandSpec> {
@@ -52,6 +60,14 @@ mod tests {
             find("RELOAD").map(|spec| spec.command),
             Some(InternalCommand::Reload)
         );
+        assert_eq!(
+            find("update").map(|spec| spec.command),
+            Some(InternalCommand::Update)
+        );
+        assert_eq!(
+            find("UPDATE").map(|spec| spec.command),
+            Some(InternalCommand::Update)
+        );
         assert!(find("nope").is_none());
     }
 
@@ -61,6 +77,9 @@ mod tests {
         assert_eq!(matching("re").count(), 1);
         assert_eq!(matching("RE").count(), 1);
         assert_eq!(matching("load").count(), 1);
+        assert_eq!(matching("up").count(), 1);
+        assert_eq!(matching("UP").count(), 1);
+        assert_eq!(matching("date").count(), 1);
         assert_eq!(matching("xyz").count(), 0);
     }
 }

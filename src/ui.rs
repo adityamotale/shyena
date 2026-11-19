@@ -477,6 +477,17 @@ impl SearchBar {
                     }
                 }
             }
+            InternalCommand::Update => {
+                if !args.is_empty() {
+                    self.show_error("update takes no arguments".to_string(), window, cx);
+                    return;
+                }
+
+                self.effects.spawn_updater();
+                self.close(window, cx);
+                #[cfg(not(test))]
+                std::process::exit(0);
+            }
         }
     }
 
@@ -1096,6 +1107,19 @@ mod tests {
 
         assert_eq!(h.config.store.borrow().current().theme, Theme::Light);
         assert!(h.config.store.borrow().current().apps.contains_key("term"));
+        assert!(h.active.borrow().is_none());
+    }
+
+    #[gpui::test]
+    fn internal_update_dispatches_updater(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input(":update");
+        let query = h.query();
+        assert_eq!(query, ":update", "query before enter");
+        h.cx.simulate_keystrokes("enter");
+
+        assert_eq!(h.effects.updaters(), 1);
         assert!(h.active.borrow().is_none());
     }
 

@@ -36,6 +36,7 @@ struct Log {
     powershell: Vec<PsLaunch>,
     trims: usize,
     window_configures: usize,
+    updaters: usize,
 }
 
 /// Captures every side effect instead of performing it.
@@ -64,6 +65,10 @@ impl RecordingEffects {
 
     pub(crate) fn window_configures(&self) -> usize {
         self.log.lock().unwrap().window_configures
+    }
+
+    pub(crate) fn updaters(&self) -> usize {
+        self.log.lock().unwrap().updaters
     }
 }
 
@@ -95,6 +100,10 @@ impl LauncherEffects for RecordingEffects {
 
     fn trim_working_set(&self) {
         self.log.lock().unwrap().trims += 1;
+    }
+
+    fn spawn_updater(&self) {
+        self.log.lock().unwrap().updaters += 1;
     }
 }
 
