@@ -262,22 +262,36 @@ profile was taken.
 
 `install.ps1` and `uninstall.ps1` are versioned in the repository root and run in a
 non-elevated user context (UIPI parity with desktop apps, no elevated/Session 0 daemon).
+Both scripts are interactive installers in the style of an `init` wizard: they print a
+banner, animate downloads with a spinner, show a `PLAN` summary, ask for a simple
+yes/no before each mutating action, and confirm once more with a final `Proceed?`
+prompt before applying anything. Declining a core step (binary install, a missing
+config) aborts; declining an optional step (Path entry, autostart, launch) only skips
+that step. `-Yes` auto-accepts every default for unattended use; without it the
+scripts refuse to run when stdin is redirected. Exit codes are `0` success, `1`
+failure and `2` user-aborted. `-DryRun` prints the same plan with defaults applied
+but makes no changes and asks no questions.
+
 `install.ps1` is also the update path — re-running it replaces the binary:
 
 1. Validate 64-bit OS, build ≥ 19041, non-elevated token and PowerShell ≥ 5.1.
 2. Download `SHA256SUMS` plus the release assets and verify SHA256 checksums before
    deploying anything.
-3. Stop any running instance, install to `%LOCALAPPDATA%\Programs\shyena\shyena.exe`,
-   and append that directory to the user `Path`.
+3. Ask permission for each action, then install to
+   `%LOCALAPPDATA%\Programs\shyena\shyena.exe`, optionally append that directory to
+   the user `Path`, and stop a running instance first if one is found.
 4. Seed `~/.config/.shyena` from the `.shyena` asset (`default.shyena` for older tags)
-   **only if it does not already exist** — an existing config is never overwritten.
-5. Register `HKCU\Software\Microsoft\Windows\CurrentVersion\Run -> Shyena` with a
-   strictly quoted exe path (unless `-NoAutostart`), then launch detached (unless
-   `-NoLaunch`).
+   **only if it does not already exist** — an existing config is never overwritten;
+   the installer reports it with a `[SKIP] already exists` notice.
+5. Optionally register `HKCU\Software\Microsoft\Windows\CurrentVersion\Run -> Shyena`
+   with a strictly quoted exe path (`-NoAutostart` forces a skip), then launch detached
+   (`-NoLaunch` forces a skip).
 
-`uninstall.ps1` stops running instances, removes the autostart key and user `Path`
-entry, deletes the install directory, and retains `~/.config/.shyena` unless
-`-PurgeConfig` is passed.
+`uninstall.ps1` asks before each removal: stopping running instances, the autostart
+key, the user `Path` entry and the install directory. A running instance is matched
+by its installed executable path, and declining to close it aborts before anything
+is changed, so a half-uninstall is never left behind. It retains `~/.config/.shyena`
+by default and only purges it when `-PurgeConfig` is passed (or the user opts in).
 
 ## Testing strategy
 
