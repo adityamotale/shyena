@@ -338,11 +338,11 @@ try {
 
     $checksums = Read-ShyenaChecksums -Path (Join-Path $tempDir 'SHA256SUMS')
 
-    # New releases ship the config as '.shyena'; older tags used 'default.shyena'.
-    if ($checksums.ContainsKey('.shyena')) {
-        $configAsset = '.shyena'
-    } elseif ($checksums.ContainsKey('default.shyena')) {
+    # Release config asset is distributed as 'default.shyena' (dotfiles dropped by GitHub).
+    if ($checksums.ContainsKey('default.shyena')) {
         $configAsset = 'default.shyena'
+    } elseif ($checksums.ContainsKey('.shyena')) {
+        $configAsset = '.shyena'
     } else {
         throw 'SHA256SUMS does not contain an entry for the config asset.'
     }

@@ -28,13 +28,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item -Path 'target/x86_64-pc-windows-msvc/release/shyena.exe' -Destination 'dist/shyena.exe'
-          Copy-Item -LiteralPath '.shyena' -Destination 'dist/.shyena'
+          Copy-Item -LiteralPath '.shyena' -Destination 'dist/default.shyena'
 
       - name: Generate SHA256SUMS
         shell: pwsh
         run: |
           $dist = Join-Path $pwd.Path 'dist'
-          $lines = @('shyena.exe', '.shyena') | ForEach-Object {
+          $lines = @('shyena.exe', 'default.shyena') | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $dist $_)).Hash.ToLowerInvariant()
             "$hash  $_"
           }
@@ -67,7 +67,7 @@ jobs:
           body: ${{ steps.changelog.outputs.body }}
           files: |
             dist/shyena.exe
-            dist/.shyena
+            dist/default.shyena
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
