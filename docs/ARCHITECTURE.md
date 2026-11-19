@@ -24,6 +24,7 @@ recovery from a failed load touch the disk.
 | `exec` | PowerShell invocation and error normalisation. |
 | `theme` | Semantic colour tokens for dark/light themes. |
 | `platform` | Win32 window styling and working-set trimming. |
+| `effects` | Side-effect boundary (Win32, process spawn, worker threads). |
 
 `dispatch::CommandIntent` is the single executable representation. Candidates
 shown in the dropdown are presentation data (`CandidateAction`) and are converted
@@ -59,6 +60,23 @@ shown, dismissible only with Esc (which closes the launcher).
 **Memory trim.** `ui::schedule_trim` waits a short delay, then asks Windows to
 evict idle pages only if no launcher window is open. The delay keeps the syscall
 off the teardown/next-frame path and lets a quick reopen cancel it.
+
+## Testing strategy
+
+`cargo test --all-targets` runs two automated tiers headlessly:
+
+- **UI integration tests** (`ui.rs`) use GPUI's `TestAppContext` and drive real
+  input with `simulate_input` / `simulate_keystrokes` / `simulate_mouse_down`.
+  They assert both visible state (query, candidates, error panel) and side
+  effects recorded by `test_support::RecordingEffects`.
+- **Pump tests** (`bootstrap.rs`) feed the hotkey and error channels directly,
+  never registering an OS-level hotkey, and assert window open/close/reuse.
+
+Everything that touches the outside world goes through `effects::LauncherEffects`:
+the binary uses `SystemEffects`, tests use `RecordingEffects`. `TestConfig`
+creates an isolated temp config per test so reloads are real file operations.
+`docs/SMOKE_TEST.md` covers the remaining desktop-only checks (global hotkey,
+DWM visuals, real process launches).
 
 ## Extension points
 
