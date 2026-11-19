@@ -277,6 +277,13 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn test_dispatch_ps_function_returns_stdout() {
+        let out = dispatch_ps_function("shyena-echo", "{ Write-Output 'ok' }", &[]).unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn test_mandatory_parameter_requires_argument() {
         let body = "{ param([Parameter(Mandatory = $true)][int]$Level) Write-Output $Level }";
 
