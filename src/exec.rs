@@ -1,23 +1,32 @@
+//! Invocation of user-defined PowerShell functions and error normalisation.
+//!
+//! Functions run on a worker thread; only failures cross back to the UI as a
+//! single-line message.
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::fs::File;
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::ERROR_LINE_MAX_CHARS;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const MAX_ERROR_CHARS: usize = 120;
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Runs a PowerShell process with output redirected to temporary files.
+///
+/// `Command::output()` cannot be used here: a GUI child spawned by a function
+/// (e.g. `Start-Process notepad`) inherits the pipe write handles, so waiting
+/// for EOF would hang forever. A unique sequence number keeps concurrent
+/// invocations from sharing those files.
 fn run_powershell(program: &str, args: &[&str]) -> std::io::Result<Output> {
-    // Capture to files instead of `output()` pipes: a GUI child spawned by a
-    // PowerShell function (e.g. Start-Process notepad) can inherit the pipe
-    // write handles and keep `output()` waiting forever for EOF.
     let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let dir = std::env::temp_dir();
-    let out_path = dir.join(format!("shyena-out-{}-{}.txt", pid, seq));
-    let err_path = dir.join(format!("shyena-err-{}-{}.txt", pid, seq));
+    let out_path = dir.join(format!("shyena-out-{pid}-{seq}.txt"));
+    let err_path = dir.join(format!("shyena-err-{pid}-{seq}.txt"));
 
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -28,14 +37,17 @@ fn run_powershell(program: &str, args: &[&str]) -> std::io::Result<Output> {
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let status = cmd.status()?;
-    drop(cmd);
 
     let stdout = std::fs::read(&out_path).unwrap_or_default();
     let stderr = std::fs::read(&err_path).unwrap_or_default();
     let _ = std::fs::remove_file(&out_path);
     let _ = std::fs::remove_file(&err_path);
 
-    Ok(Output { status, stdout, stderr })
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Functions that index `$args` cannot run meaningfully without at least one
@@ -50,6 +62,9 @@ fn indexes_dynamic_args(func_body: &str) -> bool {
 fn decode_clixml_error(raw: &str) -> Option<String> {
     const OPEN: &str = "<S S=\"Error\">";
     const CLOSE: &str = "</S>";
+    /// `&quot;` is the longest entity emitted here, so at most five characters
+    /// follow the `&` before the terminating `;`.
+    const MAX_ENTITY_TAIL: usize = 5;
 
     let start = raw.find(OPEN)? + OPEN.len();
     let end = start + raw[start..].find(CLOSE)?;
@@ -62,7 +77,7 @@ fn decode_clixml_error(raw: &str) -> Option<String> {
             match ch {
                 '&' => {
                     let mut entity = String::from("&");
-                    for _ in 0..5 {
+                    for _ in 0..MAX_ENTITY_TAIL {
                         if let Some(next) = chars.next() {
                             entity.push(next);
                             if next == ';' {
@@ -84,14 +99,16 @@ fn decode_clixml_error(raw: &str) -> Option<String> {
             continue;
         }
 
-        chars.next(); // consume 'x'
+        chars.next(); // 'x'
         let hex: String = chars.by_ref().take(4).collect();
-        if hex.len() == 4 && chars.peek() == Some(&'_') && u32::from_str_radix(&hex, 16).is_ok() {
-            chars.next(); // consume closing '_'
-            if let Some(decoded) = char::from_u32(u32::from_str_radix(&hex, 16).unwrap()) {
+        let code = u32::from_str_radix(&hex, 16).ok();
+        if hex.len() == 4 && chars.peek() == Some(&'_') && code.is_some() {
+            chars.next(); // closing '_'
+            if let Some(decoded) = code.and_then(char::from_u32) {
                 out.push(decoded);
             }
         } else {
+            // Not an escape after all; preserve the original bytes.
             out.push_str("_x");
             out.push_str(&hex);
         }
@@ -114,23 +131,29 @@ pub fn format_ps_error(func_name: &str, error: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or("execution failed");
 
-    let prefix = format!("{} : ", func_name);
-    let detail = first_line.strip_prefix(&prefix).unwrap_or(first_line);
+    let detail = first_line
+        .strip_prefix(func_name)
+        .and_then(|rest| rest.strip_prefix(" : "))
+        .unwrap_or(first_line);
     let collapsed = detail.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    let condensed: String = if collapsed.chars().count() > MAX_ERROR_CHARS {
+    let condensed: String = if collapsed.chars().count() > ERROR_LINE_MAX_CHARS {
         format!(
             "{}...",
-            collapsed.chars().take(MAX_ERROR_CHARS).collect::<String>()
+            collapsed
+                .chars()
+                .take(ERROR_LINE_MAX_CHARS)
+                .collect::<String>()
         )
     } else {
         collapsed
     };
 
-    if condensed.starts_with(&format!("{}:", func_name)) {
+    if condensed.starts_with(func_name) && condensed.as_bytes().get(func_name.len()) == Some(&b':')
+    {
         condensed
     } else {
-        format!("{}: {}", func_name, condensed)
+        format!("{func_name}: {condensed}")
     }
 }
 
@@ -144,43 +167,40 @@ pub fn dispatch_ps_function(
         return Err("requires at least one argument".to_string());
     }
 
-    // 1. Wrap in an execution block to ensure proper scope and evaluation.
-    // $ErrorActionPreference = 'Stop' turns non-terminating errors (e.g. a failed
-    // WMI method call) into real failures so they aren't silently ignored.
+    // Definition and invocation share one script block so helper variables do
+    // not leak into the caller's scope. `ErrorActionPreference` escalates
+    // non-terminating failures (e.g. a failed WMI call) into real errors.
     let safe_body = if func_body.trim().starts_with('{') {
         func_body.to_string()
     } else {
-        format!("{{\n{}\n}}", func_body)
+        format!("{{\n{func_body}\n}}")
     };
 
     let args_joined = args.join(" ");
     let script = format!(
-        "$ErrorActionPreference = 'Stop'; & {{ function {} {} ; {} {} }}",
-        func_name, safe_body, func_name, args_joined
+        "$ErrorActionPreference = 'Stop'; & {{ function {func_name} {safe_body} ; {func_name} {args_joined} }}"
     );
 
-    // 2. Encode strictly to UTF-16LE for Windows PowerShell compatibility
-    let utf16_bytes: Vec<u8> = script
-        .encode_utf16()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
+    // `-EncodedCommand` accepts UTF-16LE only, regardless of host locale.
+    let utf16_bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded_cmd = STANDARD.encode(&utf16_bytes);
 
-    // 3. Define execution arguments
+    // Bypass avoids policy-driven silent failures on locked-down machines;
+    // the other flags keep the process non-interactive and invisible.
     let ps_args = [
         "-NoProfile",
         "-NonInteractive",
         "-ExecutionPolicy",
-        "Bypass", // Prevents silent failures on restricted systems
+        "Bypass",
         "-WindowStyle",
         "Hidden",
         "-EncodedCommand",
         &encoded_cmd,
     ];
 
-    // 4. Prefer Windows PowerShell 5.1: WMI functions like Get-WmiObject and
-    // WmiSetBrightness are 5.1-only. Fall back to pwsh (7+) if 5.1 is missing
-    // or fails to execute the script.
+    // Prefer Windows PowerShell 5.1: the bundled functions use WMI APIs such
+    // as Get-WmiObject that are absent from PowerShell 7. Fall back to `pwsh`
+    // only when 5.1 is missing or fails to launch the script.
     let output = match run_powershell("powershell", &ps_args) {
         Ok(out) if out.status.success() => out,
         Ok(primary) => match run_powershell("pwsh", &ps_args) {
@@ -191,14 +211,12 @@ pub fn dispatch_ps_function(
             Ok(out) => out,
             Err(fallback_err) => {
                 return Err(format!(
-                    "Failed to spawn PowerShell (powershell: {}; pwsh: {})",
-                    primary_err, fallback_err
+                    "Failed to spawn PowerShell (powershell: {primary_err}; pwsh: {fallback_err})"
                 ));
             }
         },
     };
 
-    // 5. Handle execution results
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -245,7 +263,7 @@ mod tests {
     fn test_format_ps_error_truncates_long_errors() {
         let raw = "x".repeat(200);
         let formatted = format_ps_error("cmd", &raw);
-        assert_eq!(formatted.chars().count(), 5 + MAX_ERROR_CHARS + 3);
+        assert_eq!(formatted.chars().count(), 5 + ERROR_LINE_MAX_CHARS + 3);
         assert!(formatted.ends_with("..."));
     }
 
@@ -267,8 +285,7 @@ mod tests {
         assert_eq!(
             format_ps_error("brightness", &err),
             "brightness: Cannot process command because of one or more missing mandatory parameters: Level.",
-            "raw: {}",
-            err
+            "raw: {err}"
         );
 
         let out = dispatch_ps_function("brightness", body, &["42"]).unwrap();
