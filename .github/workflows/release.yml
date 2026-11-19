@@ -44,11 +44,30 @@ jobs:
             [Text.UTF8Encoding]::new($false)
           )
 
+      - name: Read CHANGELOG
+        id: changelog
+        shell: bash
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            body=$(awk 'NR>=3 && /^##/ { if (seen) exit; seen=1 } seen' CHANGELOG.md)
+          else
+            body=""
+          fi
+          {
+            echo "body<<EOF"
+            echo "$body"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          make_latest: true
           generate_release_notes: true
+          body: ${{ steps.changelog.outputs.body }}
           files: |
             dist/shyena.exe
             dist/.shyena
             dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
