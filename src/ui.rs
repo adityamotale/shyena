@@ -384,8 +384,7 @@ impl SearchBar {
                     // Keep the active @/#/: scope so dynamic args still resolve
                     // to the same action when Enter is pressed.
                     let scope = split_scope(&this.query)
-                        .map(|(scope, _)| scope.prefix().to_string())
-                        .unwrap_or_default();
+                        .map_or_default(|(scope, _)| scope.prefix().to_string());
 
                     this.query = format!("{}{} ", scope, candidate.key);
                     this.update_filtered_actions(window);
