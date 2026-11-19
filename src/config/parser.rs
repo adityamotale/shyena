@@ -4,18 +4,22 @@ use std::path::PathBuf;
 use crate::config::{Suggestions, fit_diagnostic};
 use crate::theme::Theme;
 
+/// Strips a matching quote pair without decoding escapes. Used for names and
+/// directive values, whose valid vocabularies contain no escape sequences.
 #[inline]
-fn unquote_literal(lit: &str) -> &str {
+fn strip_quotes(lit: &str) -> &str {
     if ((lit.starts_with('\'') && lit.ends_with('\''))
         || (lit.starts_with('"') && lit.ends_with('"')))
-        && lit.len() >= 0x02
+        && lit.len() >= 2
     {
         return &lit[1..lit.len() - 1];
     }
     lit
 }
 
-fn decode_quoted_literal(raw: &str) -> String {
+/// Strips quotes and decodes PowerShell escapes: doubled single quotes, or a
+/// backtick escape inside double quotes. Used for paths and argument values.
+fn unescape_quoted(raw: &str) -> String {
     let bytes = raw.as_bytes();
     if bytes.len() < 2 {
         return raw.to_string();
@@ -48,7 +52,7 @@ fn decode_quoted_literal(raw: &str) -> String {
 
 const DIAGNOSTIC_PREFIX: &str = "~/.config/.shyena";
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ParseError {
     pub line: u32,
     pub col: u32,
@@ -72,7 +76,7 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AppDef<'a> {
     pub name: &'a str,
     pub block_span: &'a str,
@@ -83,22 +87,32 @@ pub struct AppDef<'a> {
 impl<'a> AppDef<'a> {
     #[inline]
     pub fn unquoted_name(&self) -> &'a str {
-        unquote_literal(self.name)
+        strip_quotes(self.name)
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FunctionDef<'a> {
     pub name: &'a str,
     pub block_span: &'a str,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ConfigAst<'a> {
     pub apps: Vec<AppDef<'a>>,
     pub functions: Vec<FunctionDef<'a>>,
     pub theme: Option<Theme>,
     pub suggestions: Option<Suggestions>,
+}
+
+/// A source position captured before consuming a token, so diagnostics point
+/// at the start of the offending construct rather than the byte where parsing
+/// happened to give up.
+#[derive(Clone, Copy)]
+struct Mark {
+    pos: usize,
+    line: u32,
+    line_start: usize,
 }
 
 /// Zero-copy byte scanner for `.shyena` configuration files.
@@ -151,9 +165,7 @@ impl<'a> Scanner<'a> {
                 b'<' if self.peek_next() == Some(b'#') => {
                     // Block comment <# ... #>. An unclosed comment would
                     // otherwise silently swallow the remainder of the file.
-                    let start = self.pos;
-                    let line = self.line;
-                    let line_start = self.line_start;
+                    let start = self.mark();
                     self.advance(); // '<'
                     self.advance(); // '#'
                     let mut closed = false;
@@ -167,10 +179,8 @@ impl<'a> Scanner<'a> {
                         self.advance();
                     }
                     if !closed {
-                        return Err(self.error_at(
+                        return Err(Self::error_at(
                             start,
-                            line,
-                            line_start,
                             "unterminated block comment: missing '#>'",
                         ));
                     }
@@ -278,13 +288,9 @@ impl<'a> Scanner<'a> {
         Err(self.make_error("unterminated block: missing '}'"))
     }
 
+    /// Parses the top-level directive stream into an AST.
     pub fn parse(mut self) -> Result<ConfigAst<'a>, ParseError> {
-        let mut ast = ConfigAst {
-            apps: Vec::new(),
-            functions: Vec::new(),
-            theme: None,
-            suggestions: None,
-        };
+        let mut ast = ConfigAst::default();
 
         loop {
             self.skip_whitespace_and_comments()?;
@@ -292,111 +298,87 @@ impl<'a> Scanner<'a> {
                 break;
             }
 
-            let tok_pos = self.pos;
-            let tok_line = self.line;
-            let tok_line_start = self.line_start;
+            let start = self.mark();
             let Some(b) = self.peek() else { break };
-
             if !(b.is_ascii_alphabetic() || b == b'_') {
-                return Err(self.error_at(
-                    tok_pos,
-                    tok_line,
-                    tok_line_start,
-                    format!("unexpected character '{}'", Self::token_display(b)),
-                ));
+                return Err(Self::unexpected_character(start, b));
             }
 
             let kw = self.read_identifier_or_keyword();
-            if kw.is_empty() {
-                return Err(self.error_at(
-                    tok_pos,
-                    tok_line,
-                    tok_line_start,
-                    format!("unexpected character '{}'", Self::token_display(b)),
-                ));
-            }
-
             if kw.eq_ignore_ascii_case("Set-Theme") {
-                self.skip_whitespace_and_comments()?;
-                let val_pos = self.pos;
-                let val_line = self.line;
-                let val_line_start = self.line_start;
-                let raw = self.read_string_literal()?;
-                let value = unquote_literal(raw);
-                let Some(theme) = Theme::from_config_str(value) else {
-                    return Err(self.error_at(
-                        val_pos,
-                        val_line,
-                        val_line_start,
-                        "invalid theme: expected 'dark' or 'light'",
-                    ));
-                };
-                ast.theme = Some(theme);
+                ast.theme = Some(self.parse_theme()?);
             } else if kw.eq_ignore_ascii_case("Set-Suggestions") {
-                self.skip_whitespace_and_comments()?;
-                let val_pos = self.pos;
-                let val_line = self.line;
-                let val_line_start = self.line_start;
-                let raw = self.read_string_literal()?;
-                let value = unquote_literal(raw);
-                let Some(suggestions) = Suggestions::from_config_str(value) else {
-                    return Err(self.error_at(
-                        val_pos,
-                        val_line,
-                        val_line_start,
-                        "invalid suggestions value: expected 'on' or 'off'",
-                    ));
-                };
-                ast.suggestions = Some(suggestions);
+                ast.suggestions = Some(self.parse_suggestions()?);
             } else if kw.eq_ignore_ascii_case("Register-App") {
-                self.skip_whitespace_and_comments()?;
-                let name = self.read_string_literal()?;
-
-                self.skip_whitespace_and_comments()?;
-                if self.peek() == Some(b'@') && self.peek_next() == Some(b'{') {
-                    self.advance(); // '@'
-                    let block_start = self.pos; // start at '{' for span compatibility
-                    self.advance(); // '{'
-                    let (path, args) = self.parse_app_hashtable_contents()?;
-                    let block_span = &self.src[block_start..self.pos];
-                    ast.apps.push(AppDef {
-                        name,
-                        block_span,
-                        path,
-                        args,
-                    });
-                } else {
-                    return Err(self.make_error("expected '@{' after Register-App name"));
-                }
+                ast.apps.push(self.parse_app()?);
             } else if kw.eq_ignore_ascii_case("function") {
-                self.skip_whitespace_and_comments()?;
-                let name_pos = self.pos;
-                let name_line = self.line;
-                let name_line_start = self.line_start;
-                let name = self.read_identifier_or_keyword();
-                if name.is_empty() {
-                    return Err(self.error_at(
-                        name_pos,
-                        name_line,
-                        name_line_start,
-                        "expected function name",
-                    ));
-                }
-
-                self.skip_whitespace_and_comments()?;
-                let block_span = self.scan_balanced_block()?;
-                ast.functions.push(FunctionDef { name, block_span });
+                ast.functions.push(self.parse_function()?);
             } else {
-                return Err(self.error_at(
-                    tok_pos,
-                    tok_line,
-                    tok_line_start,
-                    format!("unexpected token '{kw}'"),
-                ));
+                return Err(Self::error_at(start, format!("unexpected token '{kw}'")));
             }
         }
 
         Ok(ast)
+    }
+
+    fn parse_theme(&mut self) -> Result<Theme, ParseError> {
+        self.skip_whitespace_and_comments()?;
+        let start = self.mark();
+        let raw = self.read_string_literal()?;
+        Theme::from_config_str(strip_quotes(raw))
+            .ok_or_else(|| Self::error_at(start, "invalid theme: expected 'dark' or 'light'"))
+    }
+
+    fn parse_suggestions(&mut self) -> Result<Suggestions, ParseError> {
+        self.skip_whitespace_and_comments()?;
+        let start = self.mark();
+        let raw = self.read_string_literal()?;
+        Suggestions::from_config_str(strip_quotes(raw)).ok_or_else(|| {
+            Self::error_at(start, "invalid suggestions value: expected 'on' or 'off'")
+        })
+    }
+
+    fn parse_app(&mut self) -> Result<AppDef<'a>, ParseError> {
+        self.skip_whitespace_and_comments()?;
+        let name = self.read_string_literal()?;
+
+        self.skip_whitespace_and_comments()?;
+        if self.peek() != Some(b'@') || self.peek_next() != Some(b'{') {
+            return Err(self.make_error("expected '@{' after Register-App name"));
+        }
+        self.advance(); // '@'
+        let block_start = self.pos; // include the opening '{' in the span
+        self.advance(); // '{'
+        let (path, args) = self.parse_app_hashtable_contents()?;
+
+        Ok(AppDef {
+            name,
+            block_span: &self.src[block_start..self.pos],
+            path,
+            args,
+        })
+    }
+
+    fn parse_function(&mut self) -> Result<FunctionDef<'a>, ParseError> {
+        self.skip_whitespace_and_comments()?;
+        let start = self.mark();
+        let name = self.read_identifier_or_keyword();
+        if name.is_empty() {
+            return Err(Self::error_at(start, "expected function name"));
+        }
+
+        self.skip_whitespace_and_comments()?;
+        Ok(FunctionDef {
+            name,
+            block_span: self.scan_balanced_block()?,
+        })
+    }
+
+    fn unexpected_character(mark: Mark, b: u8) -> ParseError {
+        Self::error_at(
+            mark,
+            format!("unexpected character '{}'", Self::token_display(b)),
+        )
     }
 
     /// Parse inside an app hashtable after consuming the opening '{' (the '@' and '{' already consumed).
@@ -415,34 +397,17 @@ impl<'a> Scanner<'a> {
                 return Ok((path.unwrap_or_default(), args.unwrap_or_default()));
             }
 
-            let key_pos = self.pos;
-            let key_line = self.line;
-            let key_line_start = self.line_start;
+            let key_start = self.mark();
             if !(b.is_ascii_alphabetic() || b == b'_') {
-                return Err(self.error_at(
-                    key_pos,
-                    key_line,
-                    key_line_start,
-                    format!("unexpected character '{}'", Self::token_display(b)),
-                ));
+                return Err(Self::unexpected_character(key_start, b));
             }
             let key = self.read_identifier_or_keyword();
-            if key.is_empty() {
-                return Err(self.error_at(
-                    key_pos,
-                    key_line,
-                    key_line_start,
-                    format!("unexpected character '{}'", Self::token_display(b)),
-                ));
-            }
 
             let is_path = key.eq_ignore_ascii_case("Path");
             let is_args = key.eq_ignore_ascii_case("Args");
             if !is_path && !is_args {
-                return Err(self.error_at(
-                    key_pos,
-                    key_line,
-                    key_line_start,
+                return Err(Self::error_at(
+                    key_start,
                     format!("unexpected token '{key}', expected 'Path' or 'Args'"),
                 ));
             }
@@ -470,7 +435,7 @@ impl<'a> Scanner<'a> {
         };
         if b == b'\'' || b == b'"' {
             let raw = self.read_string_literal()?;
-            Ok(decode_quoted_literal(raw))
+            Ok(unescape_quoted(raw))
         } else {
             let start = self.pos;
             while let Some(c) = self.peek() {
@@ -523,12 +488,11 @@ impl<'a> Scanner<'a> {
                 }
                 values.push(self.read_array_element_string()?);
             }
-        } else if b == b'\'' || b == b'"' {
-            Ok(vec![self.read_hashtable_string_value()?])
-        } else {
-            // Bare unquoted single arg (strictness relaxed only outside array; quoted preferred)
-            Ok(vec![self.read_hashtable_string_value()?])
         }
+
+        // A single scalar is accepted outside an array; the same parser
+        // handles both quoted and bare values.
+        Ok(vec![self.read_hashtable_string_value()?])
     }
 
     fn read_array_element_string(&mut self) -> Result<String, ParseError> {
@@ -537,31 +501,29 @@ impl<'a> Scanner<'a> {
         };
         if b == b'\'' || b == b'"' {
             let raw = self.read_string_literal()?;
-            return Ok(decode_quoted_literal(raw));
+            return Ok(unescape_quoted(raw));
         }
         // Strict: array elements must be quoted string literals
-        Err(self.error_at(
-            self.pos,
-            self.line,
-            self.line_start,
-            format!("unexpected character '{}'", Self::token_display(b)),
-        ))
+        Err(Self::unexpected_character(self.mark(), b))
+    }
+
+    #[inline]
+    fn mark(&self) -> Mark {
+        Mark {
+            pos: self.pos,
+            line: self.line,
+            line_start: self.line_start,
+        }
     }
 
     fn make_error(&self, message: impl Into<String>) -> ParseError {
-        self.error_at(self.pos, self.line, self.line_start, message)
+        Self::error_at(self.mark(), message)
     }
 
-    fn error_at(
-        &self,
-        pos: usize,
-        line: u32,
-        line_start: usize,
-        message: impl Into<String>,
-    ) -> ParseError {
+    fn error_at(mark: Mark, message: impl Into<String>) -> ParseError {
         ParseError {
-            line,
-            col: (pos.saturating_sub(line_start) + 1) as u32,
+            line: mark.line,
+            col: u32::try_from(mark.pos.saturating_sub(mark.line_start) + 1).unwrap_or(u32::MAX),
             message: message.into(),
         }
     }
@@ -585,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_parse_register_app_and_function() {
-        let src = r#"
+        let src = r"
 # shyena:v1
 Register-App 'code' @{
     Path = 'C:\VSCode\Code.exe'
@@ -595,19 +557,16 @@ Register-App 'code' @{
 function prompt {
     Write-Host 'test'
 }
-"#;
+";
         let ast = Scanner::new(src).parse().expect("parse should succeed");
-        assert_eq!(ast.apps.len(), 0x01);
+        assert_eq!(ast.apps.len(), 1);
         assert_eq!(ast.apps[0].name, "'code'");
         assert_eq!(ast.apps[0].unquoted_name(), "code");
-        assert_eq!(
-            ast.apps[0].path,
-            PathBuf::from(r"C:\VSCode\Code.exe")
-        );
+        assert_eq!(ast.apps[0].path, PathBuf::from(r"C:\VSCode\Code.exe"));
         assert_eq!(ast.apps[0].args, vec!["--reuse-window"]);
         assert!(ast.apps[0].block_span.contains("C:\\VSCode\\Code.exe"));
 
-        assert_eq!(ast.functions.len(), 0x01);
+        assert_eq!(ast.functions.len(), 1);
         assert_eq!(ast.functions[0].name, "prompt");
         assert_eq!(ast.functions[0].block_span, "{\n    Write-Host 'test'\n}");
     }
@@ -623,22 +582,22 @@ Register-App "complex" @{
         let ast = Scanner::new(src)
             .parse()
             .expect("should parse braces in strings and comments");
-        assert_eq!(ast.apps.len(), 0x01);
+        assert_eq!(ast.apps.len(), 1);
         assert_eq!(ast.apps[0].unquoted_name(), "complex");
-        assert_eq!(ast.apps[0].args.len(), 0x02);
+        assert_eq!(ast.apps[0].args.len(), 2);
         assert!(ast.apps[0].block_span.ends_with('}'));
     }
 
     #[test]
     fn test_single_quote_escape() {
-        let src = r#"
+        let src = r"
 Register-App 'app''name' @{
     Path = 'C:\it''s.exe'
     Args = @()
 }
-"#;
+";
         let ast = Scanner::new(src).parse().expect("single quote escaped");
-        assert_eq!(ast.apps.len(), 0x01);
+        assert_eq!(ast.apps.len(), 1);
         assert_eq!(ast.apps[0].name, "'app''name'");
         assert_eq!(ast.apps[0].path, PathBuf::from(r"C:\it's.exe"));
     }
@@ -647,7 +606,7 @@ Register-App 'app''name' @{
     fn test_double_quote_backtick_escape() {
         let src = "Register-App \"app`\"name\" @{ Path = \"val`\"quote.exe\" Args = @() }";
         let ast = Scanner::new(src).parse().expect("backtick escaped quote");
-        assert_eq!(ast.apps.len(), 0x01);
+        assert_eq!(ast.apps.len(), 1);
         assert_eq!(ast.apps[0].name, "\"app`\"name\"");
         assert_eq!(ast.apps[0].path, PathBuf::from("val\"quote.exe"));
     }
@@ -713,7 +672,9 @@ Register-App 'app''name' @{
             "unexpected message: {}",
             err.message
         );
-        assert!(err.message.contains('-') || err.message.contains("'-'") || err.message.contains('-'));
+        assert!(
+            err.message.contains('-') || err.message.contains("'-'") || err.message.contains('-')
+        );
     }
 
     #[test]
@@ -882,7 +843,7 @@ function complex_fn {
         let light = "set-theme \"LIGHT\"\nfunction f { }";
         let ast = Scanner::new(light).parse().expect("light theme parses");
         assert_eq!(ast.theme, Some(Theme::Light));
-        assert_eq!(ast.functions.len(), 0x01);
+        assert_eq!(ast.functions.len(), 1);
     }
 
     #[test]
@@ -916,8 +877,7 @@ function complex_fn {
         ] {
             let err = Scanner::new(source).parse().unwrap_err();
             assert_eq!(
-                err.message,
-                "invalid theme: expected 'dark' or 'light'",
+                err.message, "invalid theme: expected 'dark' or 'light'",
                 "source: {source}"
             );
             assert_eq!(err.line, 1);
@@ -936,7 +896,7 @@ function complex_fn {
         let off = "set-suggestions \"OFF\"\nfunction f { }";
         let ast = Scanner::new(off).parse().expect("off parses");
         assert_eq!(ast.suggestions, Some(Suggestions::Off));
-        assert_eq!(ast.functions.len(), 0x01);
+        assert_eq!(ast.functions.len(), 1);
     }
 
     #[test]
@@ -957,8 +917,7 @@ function complex_fn {
         ] {
             let err = Scanner::new(source).parse().unwrap_err();
             assert_eq!(
-                err.message,
-                "invalid suggestions value: expected 'on' or 'off'",
+                err.message, "invalid suggestions value: expected 'on' or 'off'",
                 "source: {source}"
             );
             assert_eq!(err.line, 1);

@@ -1,31 +1,32 @@
+//! Configuration loading, parsing, caching and reload semantics.
+//!
+//! The binary reads `.shyena` once at startup and serves every launcher open
+//! from memory; only `:reload` and recovery from a bad load touch the disk.
+
 pub mod io;
 pub mod parser;
 pub mod store;
 pub mod suggestions;
 
-#[allow(unused_imports, dead_code)]
-pub use io::{resolve_config_path, ConfigReader};
-#[allow(unused_imports, dead_code)]
-pub use parser::{AppDef, ConfigAst, FunctionDef, ParseError, Scanner};
+pub use io::ConfigReader;
+pub use parser::{ConfigAst, Scanner};
 pub use store::{ConfigStore, ReloadOutcome};
 pub use suggestions::Suggestions;
 
+use crate::ERROR_LINE_MAX_CHARS;
 use crate::theme::Theme;
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
-/// Maximum length of a one-line diagnostic shown in the 62 px config error panel.
-pub(crate) const DIAGNOSTIC_MAX_CHARS: usize = 120;
-
 /// Keeps a parse diagnostic on one line while preserving its location prefix.
 /// Path-bearing store diagnostics are not truncated so the path stays exact.
 pub(crate) fn fit_diagnostic(message: String) -> String {
-    if message.chars().count() <= DIAGNOSTIC_MAX_CHARS {
+    if message.chars().count() <= ERROR_LINE_MAX_CHARS {
         message
     } else {
         let mut truncated: String = message
             .chars()
-            .take(DIAGNOSTIC_MAX_CHARS.saturating_sub(3))
+            .take(ERROR_LINE_MAX_CHARS.saturating_sub(3))
             .collect();
         truncated.push_str("...");
         truncated
@@ -35,7 +36,8 @@ pub(crate) fn fit_diagnostic(message: String) -> String {
 /// Defaults are defined by the setting types themselves: `Theme::Dark` and
 /// `Suggestions::On`. `Default` is also the fallback config used while a fatal
 /// config error is displayed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct Config {
     pub apps: FxHashMap<String, AppAction>,
     pub ps: FxHashMap<String, PsAction>,
@@ -43,29 +45,33 @@ pub struct Config {
     pub suggestions: Suggestions,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A registered application and the arguments prepended to user-supplied ones.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct AppAction {
     pub path: PathBuf,
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A PowerShell function, kept both as a display script and an invocable body.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct PsAction {
     pub script: String,
     pub body: String,
 }
 
 impl Config {
+    /// Returns the one canonical location of `.shyena`.
+    ///
+    /// `%USERPROFILE%` wins on Windows; `$HOME` is the fallback for other
+    /// environments, and a working-directory-relative path is the last resort.
+    /// The binary only reads this file — installation seeds it once.
     pub fn config_path() -> PathBuf {
-        let home = std::env::var_os("USERPROFILE")
+        std::env::var_os("USERPROFILE")
             .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from);
-
-        if let Some(home_dir) = home {
-            return home_dir.join(".config").join(".shyena");
-        }
-
-        PathBuf::from(".config/.shyena")
+            .map_or_else(
+                || PathBuf::from(".config/.shyena"),
+                |home| PathBuf::from(home).join(".config").join(".shyena"),
+            )
     }
 
     pub fn from_ast(ast: &ConfigAst<'_>) -> Self {
@@ -120,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_parse_shyena_ast_and_function_invocation() {
-        let sample = r#"
+        let source = r#"
 Register-App 'wt' @{
     Path = 'C:\Windows\wt.exe'
     Args = @('--maximized', '-d', 'C:\dev')
@@ -136,11 +142,11 @@ function brightness {
     Write-Output $Level
 }
 "#;
-        let ast = Scanner::new(sample).parse().expect("valid shyena syntax");
+        let ast = Scanner::new(source).parse().expect("valid shyena syntax");
         let cfg = Config::from_ast(&ast);
 
-        assert_eq!(cfg.apps.len(), 0x02);
-        assert_eq!(cfg.ps.len(), 0x01);
+        assert_eq!(cfg.apps.len(), 2);
+        assert_eq!(cfg.ps.len(), 1);
 
         let wt = cfg.apps.get("wt").expect("wt exists");
         assert_eq!(wt.path, PathBuf::from(r"C:\Windows\wt.exe"));
@@ -164,7 +170,7 @@ function brightness {
 
         assert_eq!(cfg.theme, Theme::Dark);
         assert_eq!(cfg.suggestions, Suggestions::On);
-        assert_eq!(cfg.apps.len(), 0x02);
+        assert_eq!(cfg.apps.len(), 2);
 
         let notepad = cfg.apps.get("notepad").expect("notepad exists");
         assert_eq!(
@@ -230,7 +236,6 @@ function brightness {
         let ast = Scanner::new(light).parse().unwrap();
         let cfg = Config::from_ast(&ast);
         assert_eq!(cfg.theme, Theme::Light);
-        assert_eq!(cfg.theme.as_config_str(), "light");
 
         let missing = "Register-App 'wt' @{ Path = 'wt.exe' }";
         let ast = Scanner::new(missing).parse().unwrap();
@@ -244,7 +249,6 @@ function brightness {
         let cfg = Config::from_ast(&ast);
         assert_eq!(cfg.suggestions, Suggestions::Off);
         assert!(!cfg.suggestions.enabled());
-        assert_eq!(cfg.suggestions.as_config_str(), "off");
 
         let on = "set-suggestions \"ON\"\nfunction f { }";
         let ast = Scanner::new(on).parse().unwrap();

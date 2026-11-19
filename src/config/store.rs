@@ -1,9 +1,10 @@
-use crate::config::{Config, io::ConfigReader, parser::Scanner};
+//! Process-wide configuration cache and its reload contract.
+
+use crate::config::{Config, ConfigReader, Scanner};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Result of re-reading the configuration from disk.
-#[derive(Debug)]
 pub enum ReloadOutcome {
     Updated(Arc<Config>),
     Error(String),
@@ -236,7 +237,7 @@ mod tests {
 
         std::fs::write(&path, "function bad {\n").unwrap();
         match store.reload() {
-            ReloadOutcome::Error(message) => assert!(!message.is_empty()),
+            ReloadOutcome::Error(message) => assert_ne!(message, ""),
             ReloadOutcome::Updated(_) => panic!("expected parse failure"),
         }
 

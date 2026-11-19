@@ -1,24 +1,33 @@
+//! Low-level, read-only access to the configuration file.
+//!
+//! The reader keeps a reusable buffer across reloads so the steady-state path
+//! is a single `ReadFile` syscall with no allocation.
+
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileSizeEx, ReadFile, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFileSizeEx, OPEN_EXISTING, ReadFile,
 };
 
-/// 64 KB fast-path buffer ceiling: covers >99% of configs in a single ReadFile syscall.
+/// Fast-path buffer size. A read that fills it triggers an exact-size second
+/// pass, so it is a ceiling on the common case, not a file-size limit.
 const DEFAULT_CAPACITY: usize = 64 * 1024;
 const UTF8_BOM: &[u8; 3] = &[0xEF, 0xBB, 0xBF];
+/// Allow editors to keep the file open while we read it.
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
-/// Zero-cost RAII guard ensuring Win32 HANDLE closure across all return and error paths.
+/// Closes the Win32 handle on every return path, including read errors.
 struct FileHandle(HANDLE);
 
 impl Drop for FileHandle {
     #[inline]
     fn drop(&mut self) {
         if self.0 != INVALID_HANDLE_VALUE && !self.0.is_null() {
+            // SAFETY: `self.0` is an owned handle returned by `CreateFileW`;
+            // the guards above exclude both sentinel values.
             unsafe {
                 CloseHandle(self.0);
             }
@@ -26,51 +35,38 @@ impl Drop for FileHandle {
     }
 }
 
-/// Resolves the active Shyena configuration path (`~/.config/.shyena`).
-pub fn resolve_config_path() -> io::Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "USERPROFILE not set"))?;
-
-    Ok(home.join(".config").join(".shyena"))
-}
-
-/// Low-latency, read-only configuration file reader backed by a pre-encoded UTF-16 path
-/// and a reusable heap buffer.
+/// Low-latency, read-only configuration file reader.
+///
+/// The path is encoded to UTF-16 once at construction and the heap buffer is
+/// reused on every reload; the store owns the display path for diagnostics.
 pub struct ConfigReader {
-    #[allow(dead_code)]
-    path: PathBuf,
     wide_path: Vec<u16>,
     buffer: Vec<u8>,
 }
 
 impl ConfigReader {
-    /// Encodes `path` to null-terminated UTF-16 once and pre-allocates the 64 KB read buffer.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
+    /// Encodes `path` to null-terminated UTF-16 once and pre-allocates the
+    /// buffer used by the fast-path read.
+    pub fn new(path: impl AsRef<Path>) -> Self {
         let wide_path: Vec<u16> = path
+            .as_ref()
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
 
         Self {
-            path,
             wide_path,
             buffer: vec![0u8; DEFAULT_CAPACITY],
         }
     }
 
-    /// Returns the filesystem path bound to this reader.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Reads the entire configuration file into the internal reusable buffer and returns
-    /// a BOM-stripped, UTF-8 validated `&str` slice ready for zero-copy parsing.
+    /// Reads the whole file into the reusable buffer and returns a BOM-stripped,
+    /// UTF-8-validated slice that borrows from it (no second copy).
     pub fn read(&mut self) -> io::Result<&str> {
+        // SAFETY: `wide_path` is null-terminated by `new`; the pointers passed
+        // for the security attributes and overlapped structures are null,
+        // which `CreateFileW` explicitly permits.
         let raw_handle = unsafe {
             CreateFileW(
                 self.wide_path.as_ptr(),
@@ -90,14 +86,17 @@ impl ConfigReader {
         let handle = FileHandle(raw_handle);
         let mut total_read: usize = 0;
 
-        // Pass 1 (Fast Path): Speculative single-syscall read into existing buffer
+        // Speculative single-syscall read. Most configs fit in the buffer, so
+        // the common path avoids a size query entirely.
         let mut bytes_read: u32 = 0;
+        // SAFETY: the buffer is allocated for `DEFAULT_CAPACITY` bytes and the
+        // request length is clamped to it and to `u32::MAX`.
         let ok = unsafe {
             ReadFile(
                 handle.0,
                 self.buffer.as_mut_ptr(),
-                self.buffer.len().min(u32::MAX as usize) as u32,
-                &mut bytes_read,
+                u32::try_from(self.buffer.len()).unwrap_or(u32::MAX),
+                &raw mut bytes_read,
                 std::ptr::null_mut(),
             )
         };
@@ -107,16 +106,21 @@ impl ConfigReader {
         }
         total_read += bytes_read as usize;
 
-        // Pass 2 (Slow Path): File filled the buffer; query exact size and read remainder
+        // A full buffer is ambiguous (exact fit or more data), so query the
+        // real size and read the remainder.
         if total_read == self.buffer.len() {
             let mut file_size: i64 = 0;
-            let size_ok = unsafe { GetFileSizeEx(handle.0, &mut file_size) };
+            // SAFETY: `handle.0` is open and `file_size` is a valid out-pointer.
+            let size_ok = unsafe { GetFileSizeEx(handle.0, &raw mut file_size) };
             if size_ok == 0 {
                 return Err(io::Error::last_os_error());
             }
 
             let exact_size = usize::try_from(file_size).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "config exceeds addressable memory")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "config exceeds addressable memory",
+                )
             })?;
 
             if exact_size > total_read {
@@ -124,14 +128,17 @@ impl ConfigReader {
                 self.buffer.resize(exact_size + 1, 0);
 
                 while total_read < exact_size {
-                    let remaining = (exact_size - total_read).min(u32::MAX as usize) as u32;
+                    let remaining = u32::try_from(exact_size - total_read).unwrap_or(u32::MAX);
                     let mut chunk_read: u32 = 0;
+                    // SAFETY: the slice starting at `total_read` is at least
+                    // `remaining` bytes long after the resize above, and the
+                    // handle is still open.
                     let read_ok = unsafe {
                         ReadFile(
                             handle.0,
                             self.buffer[total_read..].as_mut_ptr(),
                             remaining,
-                            &mut chunk_read,
+                            &raw mut chunk_read,
                             std::ptr::null_mut(),
                         )
                     };
@@ -162,15 +169,23 @@ mod tests {
     use super::*;
     use std::fs::{self, OpenOptions};
     use std::os::windows::fs::OpenOptionsExt;
+    use std::path::PathBuf;
 
     fn temp_test_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("shyena_test_{}_{}.shyena", std::process::id(), name))
+        std::env::temp_dir().join(format!(
+            "shyena_test_{}_{}.shyena",
+            std::process::id(),
+            name
+        ))
     }
 
     #[test]
     fn test_fast_path_bom_and_shrink_reuse() {
         let path = temp_test_path("shrink_reuse");
-        let large = format!("\u{FEFF}Register-App 'code' @{{ Path = '{}' }}\n", "x".repeat(4096));
+        let large = format!(
+            "\u{FEFF}Register-App 'code' @{{ Path = '{}' }}\n",
+            "x".repeat(4096)
+        );
         fs::write(&path, &large).unwrap();
 
         let mut reader = ConfigReader::new(&path);
@@ -232,7 +247,10 @@ mod tests {
         let bad_utf8 = temp_test_path("bad_utf8");
         fs::write(&bad_utf8, [0xFF, 0xFE, 0xFD]).unwrap();
         let mut reader = ConfigReader::new(&bad_utf8);
-        assert_eq!(reader.read().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            reader.read().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
 
         let _ = fs::remove_file(&bad_utf8);
     }
