@@ -123,18 +123,6 @@ function Read-ShyenaConsent {
     }
 }
 
-function Get-ShyenaAnswer {
-    param(
-        [Parameter(Mandatory = $true)][string]$Prompt,
-        [string]$Help,
-        [bool]$DefaultYes = $true
-    )
-
-    if ($DryRun) { return $DefaultYes }
-    $default = if ($DefaultYes) { 'Yes' } else { 'No' }
-    return Read-ShyenaConsent -Prompt $Prompt -Help $Help -Default $default -Auto:$Yes
-}
-
 function Stop-ShyenaUninstall {
     param([string]$Message)
 
@@ -214,43 +202,42 @@ try {
     if (-not $configPresent) { Write-ShyenaStatus -Status SKIP -Label "Config already absent: $configPath" }
 
     # Collect consent for every mutating action up front (Astro-style).
-    if ($running.Count -gt 0) {
-        $closeRunning = Get-ShyenaAnswer -Prompt "Close $($running.Count) running Shyena instance(s)?" -DefaultYes $true
-        if (-not $closeRunning) {
-            Stop-ShyenaUninstall 'a running instance must be closed before uninstalling.'
-        }
-    }
-
-    $removeAutostart = $false
-    if ($autostartPresent) {
-        $removeAutostart = Get-ShyenaAnswer -Prompt 'Remove the autostart entry (HKCU Run -> Shyena)?' -DefaultYes $true
-    }
-
-    $removePath = $false
-    if ($pathPresent) {
-        $removePath = Get-ShyenaAnswer -Prompt 'Remove the install directory from your user Path?' -DefaultYes $true
-    }
-
-    $removeDir = $false
-    if ($dirPresent) {
-        $removeDir = Get-ShyenaAnswer -Prompt "Delete the install directory $installDir?" -DefaultYes $true
-    }
+    $closeRunning = ($running.Count -gt 0)
+    $removeAutostart = $autostartPresent
+    $removePath = $pathPresent
+    $removeDir = $dirPresent
 
     if ($PurgeConfig) {
         $purgeConfig = $configPresent
-    } elseif ($configPresent) {
-        $purgeConfig = Get-ShyenaAnswer -Prompt "Purge your config $configPath?" -Help 'This deletes your settings. Use -PurgeConfig to force it.' -DefaultYes $false
+    } elseif ($configPresent -and -not $DryRun) {
+        $purgeConfig = Read-ShyenaConsent `
+            -Prompt "Purge config and user settings ($configPath)?" `
+            -Help 'Default keeps settings intact for future installs.' `
+            -Default 'No' `
+            -Auto:$Yes
     } else {
         $purgeConfig = $false
     }
 
     $plan = @()
     if ($running.Count -gt 0) {
-        $plan += [pscustomobject]@{ Do = $closeRunning; Text = "Close $($running.Count) running instance(s)" }
+        $plan += [pscustomobject]@{
+            Do   = $true
+            Text = "Close $($running.Count) running Shyena instance(s)"
+        }
     }
-    $plan += [pscustomobject]@{ Do = $removeAutostart; Text = $(if ($autostartPresent) { 'Remove autostart entry' } else { 'No autostart entry to remove' }) }
-    $plan += [pscustomobject]@{ Do = $removePath; Text = $(if ($pathPresent) { 'Remove install dir from user Path' } else { 'User Path already clean' }) }
-    $plan += [pscustomobject]@{ Do = $removeDir; Text = $(if ($dirPresent) { "Delete directory: $installDir" } else { 'Directory already absent' }) }
+    $plan += [pscustomobject]@{
+        Do   = $removeAutostart
+        Text = $(if ($autostartPresent) { 'Remove autostart entry (HKCU Run -> Shyena)' } else { 'No autostart entry to remove' })
+    }
+    $plan += [pscustomobject]@{
+        Do   = $removePath
+        Text = $(if ($pathPresent) { 'Remove install dir from user Path (HKCU:\Environment)' } else { 'User Path already clean' })
+    }
+    $plan += [pscustomobject]@{
+        Do   = $removeDir
+        Text = $(if ($dirPresent) { "Delete install directory: $installDir" } else { 'Directory already absent' })
+    }
     if ($PurgeConfig -and -not $configPresent) {
         $plan += [pscustomobject]@{ Do = $false; Text = 'Config already absent' }
     } elseif ($purgeConfig) {
@@ -264,9 +251,12 @@ try {
     if ($DryRun) {
         Write-Host '  Dry run complete - no changes were made.' -ForegroundColor Yellow
     } else {
-        $proceed = Read-ShyenaConsent -Prompt 'Proceed with these changes?' -Auto:$Yes
+        $proceed = Read-ShyenaConsent -Prompt 'Proceed with uninstall?' `
+            -Help 'Removes Shyena and cleans up user registry and PATH entries.' `
+            -Default 'Yes' `
+            -Auto:$Yes
         if (-not $proceed) {
-            Stop-ShyenaUninstall 'you chose not to proceed.'
+            Stop-ShyenaUninstall 'uninstall was declined.'
         }
 
         $script:ShyenaProgressTotal = [Math]::Max(1, @($plan | Where-Object { $_.Do }).Count)
@@ -347,7 +337,7 @@ $global:LASTEXITCODE = $exitCode
 # open; redirected/non-interactive runs keep the process exit code for automation.
 $redirected = $false
 try { $redirected = [Console]::IsInputRedirected } catch { }
-if (-not [Environment]::UserInteractive -or $redirected) {
+if (-not [Environment]::UserInteractive -or $redirected -or $Yes) {
     exit $exitCode
 }
 
