@@ -2,7 +2,7 @@
 # Documentation: https://github.com/adityamotale/shyena
 #
 # This file is PowerShell. Comments are ignored; only declarations are read.
-# Reload after editing with :reload, or sign out and back in.
+# Reload after editing with `:reload`, or sign out and back in.
 #
 # PREFIXES
 #   @   registered application      @terminal
@@ -12,6 +12,10 @@
 #
 # Arguments are forwarded as typed; quotes are not parsed. Commands change
 # state (clipboard, processes, settings) rather than print output.
+#
+# The commands below are general-purpose and work on any Windows machine.
+# App-specific launchers (browsers, named terminal profiles, etc.) are left
+# as commented examples in section 2 - copy one and adapt it to your setup.
 
 
 # =============================================================================
@@ -59,12 +63,6 @@ Register-App 'taskmgr' @{
     Args = @()
 }
 
-# Your editor, with flags applied on every launch:
-# Register-App 'code' @{
-#     Path = 'code.cmd'
-#     Args = @('--new-window')
-# }
-
 
 # =============================================================================
 # 3  SESSION                                                                #
@@ -81,23 +79,29 @@ function standby {
     )
 }
 
-# Power-off / restart / sign-out are deliberately NOT enabled by default: a
-# single stray Enter must never destroy a session. To opt in, add a prompt:
-# function power-off {
-#     Add-Type -AssemblyName System.Windows.Forms
-#     $answer = [System.Windows.Forms.MessageBox]::Show(
-#         'Shut down now?', 'Shyena', 'YesNo', 'Warning'
-#     )
-#     if ($answer -eq 'Yes') { Stop-Computer }
-# }
+# shutdown - power off after an explicit confirmation. The YesNo/Warning prompt
+# is what makes this safe to keep enabled: a stray Enter cannot end the session.
+function shutdown {
+    Add-Type -AssemblyName System.Windows.Forms
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        'Shut down now?', 'Shyena', 'YesNo', 'Warning'
+    )
+    if ($answer -eq 'Yes') { Stop-Computer }
+}
+
+# Restart and sign-out follow the same guarded pattern if you want them:
+function restart {
+    Add-Type -AssemblyName System.Windows.Forms
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        'Restart now?', 'Shyena', 'YesNo', 'Warning'
+    )
+    if ($answer -eq 'Yes') { Restart-Computer }
+}
 
 
 # =============================================================================
 # 4  MEDIA                                                                  #
 # =============================================================================
-# Up/down/mute use virtual-key events; no extra software required. Each
-# function runs in its own PowerShell process, so each repeats its Add-Type.
-# The Core Audio COM declarations in 'volume' must keep their vtable order.
 
 # volume <0-100> - set the master volume.                  e.g. # volume 40
 function volume {
@@ -180,34 +184,6 @@ public static class ShyenaAudio
     [ShyenaAudio]::SetVolume($Level)
 }
 
-# volume-up - raise the master volume by one step.
-function volume-up {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class ShyenaKey {
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
-}
-'@
-    [ShyenaKey]::keybd_event(0xAF, 0, 0, [UIntPtr]::Zero)
-    [ShyenaKey]::keybd_event(0xAF, 0, 2, [UIntPtr]::Zero)
-}
-
-# volume-down - lower the master volume by one step.
-function volume-down {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class ShyenaKey {
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
-}
-'@
-    [ShyenaKey]::keybd_event(0xAE, 0, 0, [UIntPtr]::Zero)
-    [ShyenaKey]::keybd_event(0xAE, 0, 2, [UIntPtr]::Zero)
-}
-
 # mute - toggle the system mute state.
 function mute {
     Add-Type -TypeDefinition @'
@@ -224,49 +200,8 @@ public static class ShyenaKey {
 
 
 # =============================================================================
-# 5  CLIPBOARD & TEXT                                                       #
+# 6  MISC                                                                   #
 # =============================================================================
-
-# setclip <text...> - copy typed text to the clipboard.
-# Words are joined with spaces:  # setclip hello world  copies "hello world".
-function setclip {
-    if ($args.Count -eq 0) { throw 'setclip: provide some text' }
-    Set-Clipboard -Value ($args -join ' ')
-}
-
-# uuid - copy a fresh GUID to the clipboard (IDs, test data, config keys).
-function uuid { Set-Clipboard -Value ([guid]::NewGuid().ToString()) }
-
-# stamp - copy the current local time to the clipboard (logs, file names).
-function stamp { Set-Clipboard -Value (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') }
-
-
-# =============================================================================
-# 6  SYSTEM TOOLS                                                           #
-# =============================================================================
-
-# flushdns - clear the DNS resolver cache.
-function flushdns { ipconfig /flushdns }
-
-# hash <path> - copy a file's SHA-256 to the clipboard. Spaces in paths work.
-function hash {
-    if ($args.Count -eq 0) { throw 'hash: provide a file path' }
-    $path = $args -join ' '
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "hash: file not found: $path"
-    }
-    Set-Clipboard -Value ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant())
-}
-
-# killproc <name> - stop every process with that name. No confirmation prompt.
-function killproc {
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$Name
-    )
-    Stop-Process -Name $Name -Force
-}
 
 # open <target> - open a URL, file, or folder with its default handler.
 function open {
@@ -278,4 +213,16 @@ function open {
 function calc {
     if ($args.Count -eq 0) { throw 'calc: provide an expression' }
     Invoke-Expression ($args -join ' ')
+}
+
+# light <0-100> - set the display brightness.                  e.g. # light 24
+function brightness {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 100)]
+        [int]$Level
+    )
+
+    $wmi = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods
+    $wmi.WmiSetBrightness(1, $Level)
 }
