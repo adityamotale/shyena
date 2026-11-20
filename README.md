@@ -1,27 +1,28 @@
 <img src="assets/banner.png" width="100%" alt="Shyena" />
 
-[![Release](https://img.shields.io/github/v/release/adityamotale/shyena?style=flat-square&logo=github)](https://github.com/adityamotale/shyena/releases)
-[![Tests](https://img.shields.io/github/actions/workflow/status/adityamotale/shyena/tests.yaml?style=flat-square&logo=github&label=tests)](https://github.com/adityamotale/shyena/actions/workflows/tests.yaml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=flat-square&logo=windows)](https://www.microsoft.com/windows)
-[![Rust: edition 2024](https://img.shields.io/badge/Rust-edition%202024-fe640b?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![UI: GPUI](https://img.shields.io/badge/UI-GPUI-8839ef?style=flat-square)](https://gpui.rs)
+[![Release](https://img.shields.io/github/v/release/adityamotale/shyena?style=flat-square&logo=github&logoColor=5c6a72&labelColor=e6e2cc&color=8da101)](https://github.com/adityamotale/shyena/releases)
+[![Tests](https://img.shields.io/github/actions/workflow/status/adityamotale/shyena/tests.yaml?style=flat-square&logo=github&logoColor=5c6a72&labelColor=e6e2cc&label=tests)](https://github.com/adityamotale/shyena/actions/workflows/tests.yaml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-3a94c5?style=flat-square&labelColor=e6e2cc)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-35a77c?style=flat-square&logo=windows&logoColor=5c6a72&labelColor=e6e2cc)](https://www.microsoft.com/windows)
+[![Rust: edition 2024](https://img.shields.io/badge/Rust-edition%202024-f57d26?style=flat-square&logo=rust&logoColor=5c6a72&labelColor=e6e2cc)](https://www.rust-lang.org/)
+[![UI: GPUI](https://img.shields.io/badge/UI-GPUI-df69ba?style=flat-square&labelColor=e6e2cc)](https://gpui.rs)
+[![Downloads](https://img.shields.io/github/downloads/adityamotale/shyena/total?style=flat-square&logo=github&logoColor=5c6a72&labelColor=e6e2cc&color=dfa000)](https://github.com/adityamotale/shyena/releases)
+[![Issues](https://img.shields.io/github/issues/adityamotale/shyena?style=flat-square&logo=github&logoColor=5c6a72&labelColor=e6e2cc&color=f85552)](https://github.com/adityamotale/shyena/issues)
 
 Śyena is a Keyboard-first launcher and transient PowerShell automation runtime for Windows
 
 ## Index
 
-- [Installation](#installation)
+- [Install](#install)
+- [Config](#config)
+- [Usage](#usage)
 - [Update](#update)
 - [Uninstall](#uninstall)
-- [Quick Start](#quick-start)
 - [Etymology](#etymology)
-- [Runtime Guarantees](#runtime-guarantees)
-- [Configuration](#configuration)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
 
-## Installation
+## Install
 
 Run the bootstrap installer inside an interactive PowerShell console,
 
@@ -34,25 +35,31 @@ irm https://raw.githubusercontent.com/adityamotale/shyena/master/install.ps1 | i
 >
 > Administrative elevation is neither requested nor required
 
-## Update
+> [!NOTE]
+> When dismissed, working memory trims down into low megabytes, and no background PowerShell runspaces
+> or host processes persist while idle/
+>
+> Script automation runs strictly on transient worker threads spawned on demand.
 
-Update directly inside Shyena via `:update`, or run the updater in PowerShell,
+> [!NOTE]
+> Hotkey registration remains bound to a permanent hidden 1x1 Win32 anchor.
+>
+> Toggling the search surface creates or drops foreground presentation without unregistering global hotkey
+> hooks or fighting OS window focus loss.
 
+## Config
+
+Production configuration resides at `~/.config/.shyena` (local debug builds read root [`.shyena`](.shyena));
+syntax follows declarative PowerShell source evaluated once at boot,
 ```powershell
-irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | iex
+Set-Theme 'macchiato'   # 'macchiato' (default), 'latte', 'everforest-light', 'everforest-dark'
+Set-Suggestions 'on'    # 'off' = exact key + Enter only, no dropdown
 ```
 
-## Uninstall
+Issue `:reload` within the launcher interface to parse configuration changes into memory. Inspect the
+[`.shyena`](.shyena) for complete examples spanning clipboard, audio, and process commands.
 
-Run the uninstaller inside an interactive PowerShell console,
-
-```powershell
-irm https://raw.githubusercontent.com/adityamotale/shyena/master/uninstall.ps1 | iex
-```
-
-Retains `~/.config/.shyena` by default; pass `-PurgeConfig` to remove configuration files
-
-## Quick Start
+## Usage
 
 Trigger the launcher via <kbd>Alt</kbd> + <kbd>`</kbd>, then supply a routing prefix or plain query,
 
@@ -78,38 +85,33 @@ Tokens following the identifier forward directly as command arguments,
 Execution failures emit inline error diagnostics cleared via <kbd>Esc</kbd>; , while syntax
 issues in configuration surface target file lines on startup.
 
-## Etymology
+## Update
 
-_Śyena_ (Sanskrit _श्येन_) is the name of a falcon. In the *Ṛgveda*, *Śyena* is the divine bird of prey that
-soared into the heavens, broke through its defenses, and brought the sacred *Soma* down to earth.
+Update directly inside Shyena via `:update`, or run the updater in PowerShell,
 
-Just like its namesake, this project is defiant, fast, and built for precision.
-
-## Runtime Guarantees
-
-> [!NOTE]
-> When dismissed, working memory trims down into low megabytes, and no background PowerShell runspaces
-> or host processes persist while idle/
->
-> Script automation runs strictly on transient worker threads spawned on demand.
-
-> [!NOTE]
-> Hotkey registration remains bound to a permanent hidden 1x1 Win32 anchor.
->
-> Toggling the search surface creates or drops foreground presentation without unregistering global hotkey
-> hooks or fighting OS window focus loss.
-
-## Configuration
-
-Production configuration resides at `~/.config/.shyena` (local debug builds read root [`.shyena`](.shyena));
-syntax follows declarative PowerShell source evaluated once at boot,
 ```powershell
-Set-Theme 'light'       # 'dark' = Macchiato (default), 'light' = Latte
-Set-Suggestions 'on'    # 'off' = exact key + Enter only, no dropdown
+irm https://raw.githubusercontent.com/adityamotale/shyena/master/update.ps1 | iex
 ```
 
-Issue `:reload` within the launcher interface to parse configuration changes into memory. Inspect the
-[`.shyena`](.shyena) for complete examples spanning clipboard, audio, and process commands.
+## Uninstall
+
+Run the uninstaller inside an interactive PowerShell console,
+
+```powershell
+irm https://raw.githubusercontent.com/adityamotale/shyena/master/uninstall.ps1 | iex
+```
+
+Retains `~/.config/.shyena` by default; pass `-PurgeConfig` to remove configuration files
+
+## Etymology
+
+_Śyena_ (Spelled in _Saṃskṛta_ as _श्येन_) is the divine falcon of the _Ṛgveda_. In its hymns, the
+sacred _Sōma_ (the nectar of immortality) was held in the highest heaven, sealed behind a hundred
+iron fortresses and watched over by the archer _Kṛśānu_. _Śyena_ broke through every defense, seized
+the _Sōma_, and outflew _Kṛśānu_'s arrow, losing only a single feather to finally bring it down to
+_Indraḥ_ and the earth below.
+
+Just like its namesake, this project is defiant, fast, and built for precision.
 
 ## Contributing
 
