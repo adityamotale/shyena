@@ -4,9 +4,9 @@
 //! supply a recorder so launches, PowerShell dispatch, and memory trimming can
 //! be asserted without touching the operating system.
 
-use std::{path::Path, sync::Arc};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::{path::Path, sync::Arc};
 
 use async_channel::Sender;
 use gpui::Window;
