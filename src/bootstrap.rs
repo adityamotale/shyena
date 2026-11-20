@@ -54,13 +54,16 @@ pub(crate) fn setup_global_hotkey(tx: Sender<()>) -> GlobalHotKeyManager {
     if !registered {
         #[cfg(target_os = "windows")]
         {
+            use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
             use windows::core::HSTRING;
-            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
             let msg = HSTRING::from(format!(
                 "Failed to register global hotkey ({label}); another application may be using it."
             ));
             let title = HSTRING::from("Shyena - Hotkey Registration Failed");
+
+            // SAFETY: `msg` and `title` are valid null-terminated HSTRING references;
+            // passing `None` for HWND binds the modal dialog to the desktop
             unsafe {
                 let _ = MessageBoxW(None, &msg, &title, MB_OK | MB_ICONERROR);
             }
