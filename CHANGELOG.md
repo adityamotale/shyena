@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Shyena are documented in this file;
 
+## [0.0.102] - 2026-11-20
+
+### Added
+- Built-in theme variants including Catppuccin Latte, Catppuccin Macchiato, and Everforest;
+- Starter configuration updated to default to the Catppuccin Macchiato palette;
+
+### Changed
+- Streamlined installation, update, and uninstallation flows with single-step, justified confirmations;
+- Preserved user configuration and settings by default during uninstallation;
+
 ## [0.0.101] - 2026-11-20
 
 ### Added
