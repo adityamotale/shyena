@@ -488,6 +488,15 @@ impl SearchBar {
                 #[cfg(not(test))]
                 std::process::exit(0);
             }
+            InternalCommand::Quit => {
+                if !args.is_empty() {
+                    self.show_error("quit takes no arguments".to_string(), window, cx);
+                    return;
+                }
+
+                self.close(window, cx);
+                cx.quit();
+            }
         }
     }
 
@@ -1121,6 +1130,33 @@ mod tests {
 
         assert_eq!(h.effects.updaters(), 1);
         assert!(h.active.borrow().is_none());
+    }
+
+    #[gpui::test]
+    fn internal_quit_closes_window(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input(":quit");
+        assert_eq!(h.query(), ":quit", "query before enter");
+        h.cx.simulate_keystrokes("enter");
+
+        // The launcher window is removed before quit is signalled.
+        assert!(h.active.borrow().is_none(), "window closed after :quit");
+    }
+
+    #[gpui::test]
+    fn quit_rejects_arguments(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.cx.simulate_input(":quit extra");
+        h.cx.simulate_keystrokes("enter");
+
+        assert_eq!(
+            h.error().as_deref(),
+            Some("quit takes no arguments"),
+            "spurious args produce an inline error"
+        );
+        assert!(h.active.borrow().is_some(), "window stays open on error");
     }
 
     #[gpui::test]

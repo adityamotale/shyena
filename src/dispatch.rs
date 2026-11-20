@@ -286,6 +286,34 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_command_quit() {
+        let config = test_config();
+        assert_eq!(
+            resolve_command(&config, ":quit", None),
+            Ok(CommandIntent::Internal {
+                key: "quit".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            resolve_command(&config, ": quit", None),
+            Ok(CommandIntent::Internal {
+                key: "quit".to_string(),
+                args: Vec::new(),
+            })
+        );
+        // Confirm quit is scoped — wrong prefix must fail
+        assert_eq!(
+            resolve_command(&config, "@quit", None),
+            Err("unknown command 'quit'".to_string())
+        );
+        assert_eq!(
+            resolve_command(&config, "#quit", None),
+            Err("unknown command 'quit'".to_string())
+        );
+    }
+
+    #[test]
     fn test_resolve_command_rejects_unknown_and_misscoped_tokens() {
         let config = test_config();
         assert_eq!(

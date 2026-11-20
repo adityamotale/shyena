@@ -9,6 +9,7 @@
 pub enum InternalCommand {
     Reload,
     Update,
+    Quit,
 }
 
 /// Static metadata used for resolution and suggestion rendering.
@@ -28,6 +29,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "update",
         description: "Check for updates and install via PowerShell",
         command: InternalCommand::Update,
+    },
+    CommandSpec {
+        name: "quit",
+        description: "Kill the Shyena session; restarts automatically at next login",
+        command: InternalCommand::Quit,
     },
 ];
 
@@ -68,6 +74,14 @@ mod tests {
             find("UPDATE").map(|spec| spec.command),
             Some(InternalCommand::Update)
         );
+        assert_eq!(
+            find("quit").map(|spec| spec.command),
+            Some(InternalCommand::Quit)
+        );
+        assert_eq!(
+            find("QUIT").map(|spec| spec.command),
+            Some(InternalCommand::Quit)
+        );
         assert!(find("nope").is_none());
     }
 
@@ -80,6 +94,8 @@ mod tests {
         assert_eq!(matching("up").count(), 1);
         assert_eq!(matching("UP").count(), 1);
         assert_eq!(matching("date").count(), 1);
+        assert_eq!(matching("qu").count(), 1);
+        assert_eq!(matching("QU").count(), 1);
         assert_eq!(matching("xyz").count(), 0);
     }
 }
