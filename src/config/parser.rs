@@ -865,7 +865,9 @@ function complex_fn {
     #[test]
     fn test_parse_set_theme() {
         let macchiato = "Set-Theme 'macchiato'\nRegister-App 'a' @{ Path = 'a.exe' }";
-        let ast = Scanner::new(macchiato).parse().expect("macchiato theme parses");
+        let ast = Scanner::new(macchiato)
+            .parse()
+            .expect("macchiato theme parses");
         assert_eq!(ast.theme, Some(Theme::Macchiato));
 
         let latte = "set-theme \"LATTE\"\nfunction f { }";
