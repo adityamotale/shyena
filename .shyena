@@ -273,3 +273,9 @@ function open {
     if ($args.Count -eq 0) { throw 'open: provide a target' }
     Start-Process -FilePath ($args -join ' ')
 }
+
+# calc <expression...> - evaluate arithmetic expression and output result.
+function calc {
+    if ($args.Count -eq 0) { throw 'calc: provide an expression' }
+    Invoke-Expression ($args -join ' ')
+}

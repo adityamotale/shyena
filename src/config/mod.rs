@@ -253,6 +253,7 @@ function brightness {
             "hash",
             "killproc",
             "open",
+            "calc",
         ];
         assert_eq!(cfg.ps.len(), expected.len());
         for name in expected {
