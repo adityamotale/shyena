@@ -26,15 +26,22 @@ pub(crate) struct LauncherContext {
     pub(crate) effects: Effects,
 }
 
-/// Registers Alt+Backquote and forwards presses to the UI channel from a
-/// dedicated thread. The manager must be kept alive for the process lifetime.
+/// Registers the launcher toggle hotkey and forwards presses to the UI channel from
+/// a dedicated thread. Release builds register Alt+Backquote; debug builds register
+/// Alt+Shift+Backquote so development builds do not clash with installed releases.
 pub(crate) fn setup_global_hotkey(tx: Sender<()>) -> GlobalHotKeyManager {
     let manager = GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
-    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Backquote);
+
+    #[cfg(debug_assertions)]
+    let (modifiers, label) = (Modifiers::ALT | Modifiers::SHIFT, "Alt+Shift+Backquote");
+    #[cfg(not(debug_assertions))]
+    let (modifiers, label) = (Modifiers::ALT, "Alt+Backquote");
+
+    let hotkey = HotKey::new(Some(modifiers), Code::Backquote);
     let hotkey_id = hotkey.id();
     manager
         .register(hotkey)
-        .expect("Failed to register Alt+Backquote global hotkey");
+        .unwrap_or_else(|_| panic!("Failed to register {label} global hotkey"));
 
     let event_receiver = GlobalHotKeyEvent::receiver().clone();
     thread::spawn(move || {
