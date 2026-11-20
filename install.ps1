@@ -168,18 +168,6 @@ function Read-ShyenaConsent {
     }
 }
 
-function Get-ShyenaAnswer {
-    param(
-        [Parameter(Mandatory = $true)][string]$Prompt,
-        [string]$Help,
-        [bool]$DefaultYes = $true
-    )
-
-    if ($DryRun) { return $DefaultYes }
-    $default = if ($DefaultYes) { 'Yes' } else { 'No' }
-    return Read-ShyenaConsent -Prompt $Prompt -Help $Help -Default $default -Auto:$Yes
-}
-
 function Stop-ShyenaInstall {
     param([string]$Message)
 
@@ -372,58 +360,28 @@ try {
         Write-ShyenaStatus -Status SKIP -Label "Config already exists - left untouched: $configTarget"
     }
 
-    # Collect consent for every mutating action up front (Astro-style).
-    $installBinary = Get-ShyenaAnswer -Prompt "Install the binary to $exeTarget?" -Help 'Replaces any existing shyena.exe.' -DefaultYes $true
-    if (-not $installBinary) {
-        Stop-ShyenaInstall 'binary installation was declined.'
-    }
-
-    $closeRunning = $true
-    if ($running.Count -gt 0) {
-        $closeRunning = Get-ShyenaAnswer -Prompt "Close $($running.Count) running Shyena instance(s)?" -Help 'Required before replacing shyena.exe.' -DefaultYes $true
-        if (-not $closeRunning) {
-            Stop-ShyenaInstall 'a running instance must be closed to replace the binary.'
-        }
-    }
-
-    if ($pathPresent) {
-        $addPath = $false
-    } else {
-        $addPath = Get-ShyenaAnswer -Prompt 'Add the install folder to your user Path?' -Help 'New terminals will see shyena on PATH.' -DefaultYes $true
-    }
-
-    if ($configExists) {
-        $writeConfig = $false
-    } else {
-        $writeConfig = Get-ShyenaAnswer -Prompt "Write the default config to $configTarget?" -Help 'Seeded once from the release default; never overwritten later.' -DefaultYes $true
-        if (-not $writeConfig) {
-            Stop-ShyenaInstall 'config creation was declined; Shyena needs a config file.'
-        }
-    }
-
-    if ($NoAutostart) {
-        $autostart = $false
-    } else {
-        $autostart = Get-ShyenaAnswer -Prompt 'Register Shyena to start at logon?' -Help 'Adds HKCU Run -> Shyena.' -DefaultYes $true
-    }
-
-    if ($NoLaunch) {
-        $launch = $false
-    } else {
-        $launch = Get-ShyenaAnswer -Prompt 'Launch Shyena when finished?' -DefaultYes $true
-    }
+    $installBinary = $true
+    $closeRunning = ($running.Count -gt 0)
+    $addPath = (-not $pathPresent)
+    $writeConfig = (-not $configExists)
+    $autostart = (-not $NoAutostart)
+    $launch = (-not $NoLaunch)
 
     $plan = @()
-    $plan += [pscustomobject]@{ Do = $installBinary; Text = "Install binary -> $exeTarget" }
+    $plan += [pscustomobject]@{ Do = $true; Text = "Install binary -> $exeTarget" }
     if ($running.Count -gt 0) {
-        $plan += [pscustomobject]@{ Do = $closeRunning; Text = "Close $($running.Count) running instance(s)" }
+        $plan += [pscustomobject]@{
+            Do   = $true
+            Text = "Close $($running.Count) running Shyena instance(s) to unlock binary"
+        }
     }
     if ($pathPresent) {
         $plan += [pscustomobject]@{ Do = $false; Text = 'Keep user Path (already contains install dir)' }
-    } elseif ($addPath) {
-        $plan += [pscustomobject]@{ Do = $true; Text = 'Add install dir to user Path' }
     } else {
-        $plan += [pscustomobject]@{ Do = $false; Text = 'Skip adding install dir to user Path (declined)' }
+        $plan += [pscustomobject]@{
+            Do   = $true
+            Text = 'Add install dir to user Path (HKCU:\Environment) for CLI access'
+        }
     }
     if ($configExists) {
         $plan += [pscustomobject]@{ Do = $false; Text = "Keep existing config -> $configTarget" }
@@ -433,12 +391,15 @@ try {
     if ($NoAutostart) {
         $plan += [pscustomobject]@{ Do = $false; Text = 'Skip autostart (-NoAutostart)' }
     } else {
-        $plan += [pscustomobject]@{ Do = $autostart; Text = $(if ($autostart) { 'Register autostart (HKCU Run -> Shyena)' } else { 'Skip autostart (declined)' }) }
+        $plan += [pscustomobject]@{
+            Do   = $true
+            Text = 'Register autostart at logon (HKCU Run -> Shyena)'
+        }
     }
     if ($NoLaunch) {
         $plan += [pscustomobject]@{ Do = $false; Text = 'Skip launch (-NoLaunch)' }
     } else {
-        $plan += [pscustomobject]@{ Do = $launch; Text = $(if ($launch) { 'Launch Shyena on completion' } else { 'Skip launch (declined)' }) }
+        $plan += [pscustomobject]@{ Do = $true; Text = 'Launch Shyena daemon on completion' }
     }
 
     Show-ShyenaPlan -Items $plan
@@ -446,9 +407,12 @@ try {
     if ($DryRun) {
         Write-Host '  Dry run complete - no changes were made.' -ForegroundColor Yellow
     } else {
-        $proceed = Read-ShyenaConsent -Prompt 'Proceed with these changes?' -Auto:$Yes
+        $proceed = Read-ShyenaConsent -Prompt 'Proceed with installation?' `
+            -Help 'Installs Shyena for your user account with the actions listed above.' `
+            -Default 'Yes' `
+            -Auto:$Yes
         if (-not $proceed) {
-            Stop-ShyenaInstall 'you chose not to proceed.'
+            Stop-ShyenaInstall 'installation was declined.'
         }
 
         $script:ShyenaProgressTotal = [Math]::Max(1, @($plan | Where-Object { $_.Do }).Count)
@@ -539,7 +503,7 @@ $global:LASTEXITCODE = $exitCode
 # open; redirected/non-interactive runs keep the process exit code for automation.
 $redirected = $false
 try { $redirected = [Console]::IsInputRedirected } catch { }
-if (-not [Environment]::UserInteractive -or $redirected) {
+if (-not [Environment]::UserInteractive -or $redirected -or $Yes) {
     exit $exitCode
 }
 
