@@ -398,14 +398,22 @@ try {
     if ($running.Count -gt 0) {
         $plan += [pscustomobject]@{
             Do   = $true
-            Text = "Close $($running.Count) running Shyena instance(s)"
+            Text = "Close $($running.Count) running Shyena instance(s) to unlock binary"
         }
     }
     $plan += [pscustomobject]@{
         Do   = $true
         Text = "Update binary -> $exeTarget (v$remoteVersion)"
     }
-    $launchText = if (-not $NoLaunch) { 'Relaunch Shyena after update' } else { 'Skip launch' }
+    $plan += [pscustomobject]@{
+        Do   = $false
+        Text = 'Preserve existing configuration and user settings'
+    }
+    $launchText = if (-not $NoLaunch) {
+        'Relaunch Shyena daemon after update'
+    } else {
+        'Skip launch (-NoLaunch)'
+    }
     $plan += [pscustomobject]@{ Do = (-not $NoLaunch); Text = $launchText }
 
     Show-ShyenaPlan -Items $plan
@@ -413,7 +421,10 @@ try {
     if ($DryRun) {
         Write-Host '  Dry run complete - no changes were made.' -ForegroundColor Yellow
     } else {
-        $proceed = Read-ShyenaConsent -Prompt "Update Shyena to v$remoteVersion now?" -Auto:$Yes
+        $proceed = Read-ShyenaConsent -Prompt "Update Shyena to v$remoteVersion now?" `
+            -Help 'Installs the updated binary; existing configuration is preserved.' `
+            -Default 'Yes' `
+            -Auto:$Yes
         if (-not $proceed) {
             Stop-ShyenaUpdate 'update was declined.'
         }
