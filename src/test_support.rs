@@ -14,7 +14,7 @@ use async_channel::Sender;
 use gpui::Window;
 
 use crate::config::ConfigStore;
-use crate::dispatch::PsError;
+use crate::dispatch::PsOutcome;
 use crate::effects::LauncherEffects;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +89,7 @@ impl LauncherEffects for RecordingEffects {
         name: &str,
         body: &str,
         args: &[String],
-        _error_tx: Sender<PsError>,
+        _outcome_tx: Sender<PsOutcome>,
     ) {
         self.log.lock().unwrap().powershell.push(PsLaunch {
             name: name.to_string(),

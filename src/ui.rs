@@ -19,7 +19,7 @@ use gpui::{
 use crate::commands::{self, InternalCommand};
 use crate::config::{self, ConfigStore, ReloadOutcome};
 use crate::dispatch::{
-    ActionKind, CandidateAction, CommandIntent, PsError, Scope, resolve_command, split_scope,
+    ActionKind, CandidateAction, CommandIntent, PsOutcome, Scope, resolve_command, split_scope,
 };
 use crate::effects::Effects;
 use crate::theme::{Palette, Theme};
@@ -28,6 +28,17 @@ const WIN_WIDTH: f32 = 660.0;
 const BAR_HEIGHT: f32 = 62.0;
 const ITEM_HEIGHT: f32 = 32.0;
 const MAX_VISIBLE_ITEMS: usize = 6;
+const MAX_OUTPUT_LINES: usize = 8;
+const OUTPUT_LINE_HEIGHT: f32 = 18.0;
+const OUTPUT_HEADER_HEIGHT: f32 = 24.0;
+const OUTPUT_PADDING: f32 = 12.0;
+
+/// Output of a completed PowerShell function shown below the bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PsOutput {
+    pub(crate) name: String,
+    pub(crate) text: String,
+}
 
 /// Shared handle to the single launcher window, or `None` while dismissed.
 pub(crate) type ActiveWindow = Rc<RefCell<Option<WindowHandle<SearchBar>>>>;
@@ -109,13 +120,14 @@ pub(crate) struct SearchBar {
     _subscription: Subscription,
     active_window: ActiveWindow,
     config: Arc<config::Config>,
-    ps_error_tx: Sender<PsError>,
+    ps_outcome_tx: Sender<PsOutcome>,
     store: Rc<RefCell<ConfigStore>>,
     effects: Effects,
     theme: Theme,
     selected_index: usize,
     filtered_actions: Vec<CandidateAction>,
     error: Option<ErrorState>,
+    output: Option<PsOutput>,
 }
 
 impl SearchBar {
@@ -123,7 +135,7 @@ impl SearchBar {
         window: &mut Window,
         cx: &mut Context<Self>,
         active_window: ActiveWindow,
-        ps_error_tx: Sender<PsError>,
+        ps_outcome_tx: Sender<PsOutcome>,
         store: Rc<RefCell<ConfigStore>>,
         effects: Effects,
     ) -> Self {
@@ -152,24 +164,35 @@ impl SearchBar {
             _subscription: subscription,
             active_window,
             config,
-            ps_error_tx,
+            ps_outcome_tx,
             store,
             effects,
             theme,
             selected_index: 0,
             filtered_actions: Vec::new(),
             error: None,
+            output: None,
         };
         instance.update_filtered_actions(window);
         instance
     }
 
+    fn output_panel_height(&self) -> f32 {
+        if let Some(out) = &self.output {
+            let line_count = out.text.lines().count().max(1).min(MAX_OUTPUT_LINES);
+            OUTPUT_HEADER_HEIGHT + (line_count as f32 * OUTPUT_LINE_HEIGHT) + OUTPUT_PADDING
+        } else {
+            0.0
+        }
+    }
+
     fn update_filtered_actions(&mut self, window: &mut Window) {
+        let output_h = self.output_panel_height();
         let trimmed = self.query.trim();
         if trimmed.is_empty() {
             self.filtered_actions.clear();
             self.selected_index = 0;
-            Self::resize_to_height(window, BAR_HEIGHT);
+            Self::resize_to_height(window, BAR_HEIGHT + output_h);
             return;
         }
 
@@ -179,7 +202,7 @@ impl SearchBar {
         if !self.config.suggestions.enabled() {
             self.filtered_actions.clear();
             self.selected_index = 0;
-            Self::resize_to_height(window, BAR_HEIGHT);
+            Self::resize_to_height(window, BAR_HEIGHT + output_h);
             return;
         }
 
@@ -263,7 +286,7 @@ impl SearchBar {
         } else {
             0.0
         };
-        Self::resize_to_height(window, BAR_HEIGHT + list_height);
+        Self::resize_to_height(window, BAR_HEIGHT + list_height + output_h);
     }
 
     /// Resizes only when the change is visible, so typing within the same
@@ -279,6 +302,7 @@ impl SearchBar {
 
     fn set_error(&mut self, error: ErrorState, window: &mut Window, cx: &mut Context<Self>) {
         self.error = Some(error);
+        self.output = None;
         self.query.clear();
         self.filtered_actions.clear();
         self.selected_index = 0;
@@ -294,6 +318,28 @@ impl SearchBar {
         cx: &mut Context<Self>,
     ) {
         self.set_error(ErrorState::Runtime(message), window, cx);
+    }
+
+    /// Displays stdout output from a completed PowerShell function.
+    pub(crate) fn show_ps_output(
+        &mut self,
+        name: String,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = None;
+        self.output = Some(PsOutput { name, text });
+        self.update_filtered_actions(window);
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn dismiss_output(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.output = None;
+        self.update_filtered_actions(window);
+        self.focus_handle.focus(window);
+        cx.notify();
     }
 
     /// Config errors are fatal: [Esc] must close the launcher instead of
@@ -356,6 +402,11 @@ impl SearchBar {
                     this.dismiss_error(window, cx);
                 }
             }
+            return;
+        }
+
+        if this.output.is_some() && event.keystroke.key == "escape" {
+            this.dismiss_output(window, cx);
             return;
         }
 
@@ -429,7 +480,7 @@ impl SearchBar {
     fn launch_ps(&self, key: &str, dynamic_args: &[String]) {
         if let Some(ps) = self.config.ps.get(key) {
             self.effects
-                .spawn_powershell(key, &ps.body, dynamic_args, self.ps_error_tx.clone());
+                .spawn_powershell(key, &ps.body, dynamic_args, self.ps_outcome_tx.clone());
         }
     }
 
@@ -555,6 +606,7 @@ impl Render for SearchBar {
         root.child(Self::render_header(palette))
             .child(self.render_input(palette, mode_tag))
             .children(self.render_suggestions(palette, cx))
+            .children(self.render_output(palette))
     }
 }
 
@@ -828,13 +880,78 @@ impl SearchBar {
                 })),
         )
     }
+
+    fn render_output(&self, palette: Palette) -> Option<Div> {
+        let output = self.output.as_ref()?;
+
+        Some(
+            div()
+                .w_full()
+                .border_t_1()
+                .border_color(palette.border_subtle)
+                .flex()
+                .flex_col()
+                .bg(palette.surface0)
+                .child(
+                    div()
+                        .h(px(OUTPUT_HEADER_HEIGHT))
+                        .px(px(12.0))
+                        .bg(palette.header)
+                        .border_b_1()
+                        .border_color(palette.border_subtle)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .text_size(px(10.5))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(div().text_color(palette.bracket).child("┌─["))
+                                .child(
+                                    div()
+                                        .text_color(palette.ps)
+                                        .child(format!("stdout:{}", output.name)),
+                                )
+                                .child(div().text_color(palette.bracket).child("]")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(div().text_color(palette.hint).child("[ ESC: clear ]"))
+                                .child(div().text_color(palette.bracket).child("─┐")),
+                        ),
+                )
+                .child(
+                    div()
+                        .max_h(px(OUTPUT_LINE_HEIGHT * MAX_OUTPUT_LINES as f32 + OUTPUT_PADDING))
+                        .overflow_hidden()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .children(output.text.lines().take(MAX_OUTPUT_LINES).map(|line| {
+                            div()
+                                .h(px(OUTPUT_LINE_HEIGHT))
+                                .flex()
+                                .items_center()
+                                .text_size(px(12.0))
+                                .text_color(palette.text)
+                                .child(line.to_string())
+                        })),
+                ),
+        )
+    }
 }
 
 /// Opens the launcher, retrying a previously failed config load on the way in.
 pub(crate) fn open_search_window(
     cx: &mut App,
     active_window: &ActiveWindow,
-    ps_error_tx: Sender<PsError>,
+    ps_outcome_tx: Sender<PsOutcome>,
     store: &Rc<RefCell<ConfigStore>>,
     effects: &Effects,
 ) -> WindowHandle<SearchBar> {
@@ -884,7 +1001,7 @@ pub(crate) fn open_search_window(
     let effects = effects.clone();
     let handle = cx
         .open_window(options, move |window, cx| {
-            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_error_tx, store_ref, effects))
+            cx.new(|cx| SearchBar::new(window, cx, active_ref, ps_outcome_tx, store_ref, effects))
         })
         .unwrap();
 
@@ -902,7 +1019,7 @@ pub(crate) fn open_search_window(
 pub(crate) fn toggle_search_window(
     cx: &mut App,
     active_window: &ActiveWindow,
-    ps_error_tx: &Sender<PsError>,
+    ps_outcome_tx: &Sender<PsOutcome>,
     store: &Rc<RefCell<ConfigStore>>,
     effects: &Effects,
 ) {
@@ -916,7 +1033,7 @@ pub(crate) fn toggle_search_window(
     if was_open {
         schedule_trim(cx, active_window, effects, Duration::from_millis(200));
     } else {
-        let handle = open_search_window(cx, active_window, ps_error_tx.clone(), store, effects);
+        let handle = open_search_window(cx, active_window, ps_outcome_tx.clone(), store, effects);
         *active_window.borrow_mut() = Some(handle);
     }
 }
@@ -930,6 +1047,20 @@ pub(crate) fn error_message<C: AppContext>(
     window
         .update(cx, |bar, _, _| {
             bar.error.as_ref().map(|e| e.message().to_string())
+        })
+        .ok()
+        .flatten()
+}
+
+/// Returns the output (name, text) currently shown, if any. Used by the async pump tests.
+#[cfg(test)]
+pub(crate) fn output_message<C: AppContext>(
+    window: &WindowHandle<SearchBar>,
+    cx: &mut C,
+) -> Option<(String, String)> {
+    window
+        .update(cx, |bar, _, _| {
+            bar.output.as_ref().map(|o| (o.name.clone(), o.text.clone()))
         })
         .ok()
         .flatten()
@@ -996,6 +1127,10 @@ mod tests {
 
         fn error(&mut self) -> Option<String> {
             self.state(|bar| bar.error.as_ref().map(|e| e.message().to_string()))
+        }
+
+        fn output(&mut self) -> Option<(String, String)> {
+            self.state(|bar| bar.output.as_ref().map(|o| (o.name.clone(), o.text.clone())))
         }
 
         /// Drives timers scheduled with `Timer::after` on the foreground executor.
@@ -1221,5 +1356,23 @@ mod tests {
         h.cx.simulate_keystrokes("enter");
 
         assert_eq!(h.effects.app_launches()[0].path, PathBuf::from("calc.exe"));
+    }
+
+    #[gpui::test]
+    fn ps_output_displayed_and_cleared_on_escape(cx: &TestAppContext) {
+        let mut h = open(cx, UI_CONFIG);
+
+        h.window
+            .update(&mut h.cx, |bar, window, cx| {
+                bar.show_ps_output("uuid".into(), "1234-5678".into(), window, cx);
+            })
+            .unwrap();
+
+        assert_eq!(h.output(), Some(("uuid".into(), "1234-5678".into())));
+        assert!(h.active.borrow().is_some());
+
+        h.cx.simulate_keystrokes("escape");
+        assert_eq!(h.output(), None);
+        assert!(h.active.borrow().is_some());
     }
 }

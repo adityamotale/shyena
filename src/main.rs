@@ -27,7 +27,7 @@ mod test_support;
 use async_channel::{Receiver, Sender};
 use bootstrap::LauncherContext;
 use config::ConfigStore;
-use dispatch::PsError;
+use dispatch::PsOutcome;
 use effects::SystemEffects;
 use gpui::{App, Application};
 use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc, time::Duration};
@@ -56,13 +56,13 @@ fn main() {
         let _anchor = ui::open_anchor_window(cx);
 
         let (hotkey_tx, hotkey_rx): (Sender<()>, Receiver<()>) = async_channel::unbounded();
-        let (ps_err_tx, ps_err_rx): (Sender<PsError>, Receiver<PsError>) =
+        let (ps_outcome_tx, ps_outcome_rx): (Sender<PsOutcome>, Receiver<PsOutcome>) =
             async_channel::unbounded();
 
         let context = LauncherContext {
             active_window: Rc::new(RefCell::new(None)),
             config_store,
-            ps_error_tx: ps_err_tx,
+            ps_outcome_tx,
             effects: Arc::new(SystemEffects),
         };
 
@@ -74,7 +74,7 @@ fn main() {
             Duration::from_secs(2),
         );
 
-        bootstrap::spawn_error_pump(cx, ps_err_rx, &context);
+        bootstrap::spawn_outcome_pump(cx, ps_outcome_rx, &context);
         let manager = bootstrap::setup_global_hotkey(hotkey_tx);
         bootstrap::spawn_hotkey_pump(cx, hotkey_rx, &context, manager);
     });

@@ -14,7 +14,7 @@ use global_hotkey::{
 use gpui::App;
 
 use crate::config::ConfigStore;
-use crate::dispatch::PsError;
+use crate::dispatch::PsOutcome;
 use crate::effects::Effects;
 use crate::ui::{self, ActiveWindow};
 
@@ -22,7 +22,7 @@ use crate::ui::{self, ActiveWindow};
 pub(crate) struct LauncherContext {
     pub(crate) active_window: ActiveWindow,
     pub(crate) config_store: Rc<RefCell<ConfigStore>>,
-    pub(crate) ps_error_tx: Sender<PsError>,
+    pub(crate) ps_outcome_tx: Sender<PsOutcome>,
     pub(crate) effects: Effects,
 }
 
@@ -55,42 +55,51 @@ pub(crate) fn setup_global_hotkey(tx: Sender<()>) -> GlobalHotKeyManager {
     manager
 }
 
-/// Surfaces asynchronous PowerShell failures in the launcher itself. If the
-/// bar was already dismissed, open a fresh window in the error state.
-pub(crate) fn spawn_error_pump(cx: &mut App, rx: Receiver<PsError>, ctx: &LauncherContext) {
+/// Surfaces asynchronous PowerShell outcomes (output or error) in the launcher itself.
+/// If the bar was already dismissed, open a fresh window.
+pub(crate) fn spawn_outcome_pump(cx: &mut App, rx: Receiver<PsOutcome>, ctx: &LauncherContext) {
     let active = ctx.active_window.clone();
-    let ps_error_tx = ctx.ps_error_tx.clone();
+    let ps_outcome_tx = ctx.ps_outcome_tx.clone();
     let store = ctx.config_store.clone();
     let effects = ctx.effects.clone();
 
     cx.spawn(async move |cx| {
-        while let Ok(err) = rx.recv().await {
+        while let Ok(outcome) = rx.recv().await {
             let active = active.clone();
-            let ps_error_tx = ps_error_tx.clone();
+            let ps_outcome_tx = ps_outcome_tx.clone();
             let store = store.clone();
             let effects = effects.clone();
-            let message = err.message;
             let _ = cx.update(move |cx| {
                 let handle = active.borrow().as_ref().copied();
                 let handle = if let Some(handle) = handle {
                     handle
                 } else {
                     let handle =
-                        ui::open_search_window(cx, &active, ps_error_tx.clone(), &store, &effects);
+                        ui::open_search_window(cx, &active, ps_outcome_tx.clone(), &store, &effects);
                     *active.borrow_mut() = Some(handle);
                     handle
                 };
 
-                if handle
-                    .update(cx, |bar, window, cx| {
+                let update_result = handle.update(cx, |bar, window, cx| match &outcome {
+                    PsOutcome::Error(message) => {
                         bar.show_error(message.clone(), window, cx);
-                    })
-                    .is_err()
-                {
-                    let handle = ui::open_search_window(cx, &active, ps_error_tx, &store, &effects);
+                    }
+                    PsOutcome::Output { name, text } => {
+                        bar.show_ps_output(name.clone(), text.clone(), window, cx);
+                    }
+                });
+
+                if update_result.is_err() {
+                    let handle =
+                        ui::open_search_window(cx, &active, ps_outcome_tx, &store, &effects);
                     *active.borrow_mut() = Some(handle);
-                    let _ = handle.update(cx, |bar, window, cx| {
-                        bar.show_error(message, window, cx);
+                    let _ = handle.update(cx, |bar, window, cx| match outcome {
+                        PsOutcome::Error(message) => {
+                            bar.show_error(message, window, cx);
+                        }
+                        PsOutcome::Output { name, text } => {
+                            bar.show_ps_output(name, text, window, cx);
+                        }
                     });
                 }
             });
@@ -110,7 +119,7 @@ pub(crate) fn spawn_hotkey_pump<K: 'static>(
     keep_alive: K,
 ) {
     let active = ctx.active_window.clone();
-    let ps_error_tx = ctx.ps_error_tx.clone();
+    let ps_outcome_tx = ctx.ps_outcome_tx.clone();
     let store = ctx.config_store.clone();
     let effects = ctx.effects.clone();
 
@@ -118,11 +127,11 @@ pub(crate) fn spawn_hotkey_pump<K: 'static>(
         let _keep_alive = keep_alive;
         while let Ok(()) = rx.recv().await {
             let active = active.clone();
-            let ps_error_tx = ps_error_tx.clone();
+            let ps_outcome_tx = ps_outcome_tx.clone();
             let store = store.clone();
             let effects = effects.clone();
             let _ = cx.update(move |cx| {
-                ui::toggle_search_window(cx, &active, &ps_error_tx, &store, &effects);
+                ui::toggle_search_window(cx, &active, &ps_outcome_tx, &store, &effects);
             });
         }
     })
@@ -141,7 +150,7 @@ mod tests {
     struct PumpHarness {
         ctx: LauncherContext,
         hotkey_tx: Sender<()>,
-        ps_tx: Sender<PsError>,
+        ps_tx: Sender<PsOutcome>,
         // Kept alive so the temp config directory survives the test.
         _config: TestConfig,
         effects: Arc<RecordingEffects>,
@@ -155,12 +164,12 @@ mod tests {
         let ctx = LauncherContext {
             active_window: Rc::new(RefCell::new(None)),
             config_store: config.store.clone(),
-            ps_error_tx: ps_tx.clone(),
+            ps_outcome_tx: ps_tx.clone(),
             effects: effects.clone(),
         };
         cx.update(|app| {
             spawn_hotkey_pump(app, hotkey_rx, &ctx, ());
-            spawn_error_pump(app, ps_rx, &ctx);
+            spawn_outcome_pump(app, ps_rx, &ctx);
         });
         PumpHarness {
             ctx,
@@ -198,9 +207,7 @@ mod tests {
         let h = harness(cx);
 
         h.ps_tx
-            .send_blocking(PsError {
-                message: "brightness: failed".into(),
-            })
+            .send_blocking(PsOutcome::Error("brightness: failed".into()))
             .unwrap();
         advance(cx);
 
@@ -223,9 +230,7 @@ mod tests {
         let before = h.ctx.active_window.borrow().as_ref().copied().unwrap();
 
         h.ps_tx
-            .send_blocking(PsError {
-                message: "volume: failed".into(),
-            })
+            .send_blocking(PsOutcome::Error("volume: failed".into()))
             .unwrap();
         advance(cx);
 
@@ -233,5 +238,29 @@ mod tests {
         assert_eq!(before, after, "the same window handle is reused");
         let message = cx.update(|app| ui::error_message(&after, app));
         assert_eq!(message.as_deref(), Some("volume: failed"));
+    }
+
+    #[gpui::test]
+    fn outcome_pump_displays_stdout_in_open_window(cx: &TestAppContext) {
+        let h = harness(cx);
+        h.hotkey_tx.send_blocking(()).unwrap();
+        advance(cx);
+        let before = h.ctx.active_window.borrow().as_ref().copied().unwrap();
+
+        h.ps_tx
+            .send_blocking(PsOutcome::Output {
+                name: "uuid".into(),
+                text: "123e4567-e89b-12d3-a456-426614174000".into(),
+            })
+            .unwrap();
+        advance(cx);
+
+        let after = h.ctx.active_window.borrow().as_ref().copied().unwrap();
+        assert_eq!(before, after, "the same window handle is reused");
+        let output = cx.update(|app| ui::output_message(&after, app));
+        assert_eq!(
+            output,
+            Some(("uuid".to_string(), "123e4567-e89b-12d3-a456-426614174000".to_string()))
+        );
     }
 }

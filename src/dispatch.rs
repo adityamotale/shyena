@@ -165,32 +165,43 @@ pub(crate) fn resolve_command(
         .ok_or_else(|| format!("unknown command '{key}'"))
 }
 
-/// A PowerShell failure delivered from a worker thread to the UI channel.
-#[derive(Clone)]
-pub(crate) struct PsError {
-    pub(crate) message: String,
+/// Outcome of a PowerShell invocation delivered from a worker thread to the UI channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PsOutcome {
+    Output { name: String, text: String },
+    Error(String),
 }
 
-/// Runs one PowerShell function and reports failures through the shared error
-/// channel. Blocking: callers must run this off the UI thread.
+/// Runs one PowerShell function and reports outcomes through the shared channel.
+/// Blocking: callers must run this off the UI thread.
 pub(crate) fn run_ps_task(
     function_name: &str,
     function_body: &str,
     dynamic_tokens: &[String],
-    error_tx: &Sender<PsError>,
+    outcome_tx: &Sender<PsOutcome>,
 ) {
     let args: Vec<&str> = dynamic_tokens.iter().map(String::as_str).collect();
-    if let Err(err) = exec::dispatch_ps_function(function_name, function_body, &args) {
-        let _ = error_tx.send_blocking(PsError {
-            message: exec::format_ps_error(function_name, &err),
-        });
+    match exec::dispatch_ps_function(function_name, function_body, &args) {
+        Ok(stdout) => {
+            if !stdout.is_empty() {
+                let _ = outcome_tx.send_blocking(PsOutcome::Output {
+                    name: function_name.to_string(),
+                    text: stdout,
+                });
+            }
+        }
+        Err(err) => {
+            let _ = outcome_tx.send_blocking(PsOutcome::Error(
+                exec::format_ps_error(function_name, &err),
+            ));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionKind, CandidateAction, CommandIntent, PsError, Scope, resolve_command, run_ps_task,
+        ActionKind, CandidateAction, CommandIntent, PsOutcome, Scope, resolve_command, run_ps_task,
         split_scope,
     };
     use crate::config::{AppAction, Config, PsAction};
@@ -383,11 +394,41 @@ mod tests {
 
     #[test]
     fn test_run_ps_task_reports_missing_argument_to_ui_channel() {
-        let (error_tx, error_rx) = async_channel::unbounded::<PsError>();
+        let (outcome_tx, outcome_rx) = async_channel::unbounded::<PsOutcome>();
 
-        run_ps_task("brightness", "{ [int]$args[0] }", &[], &error_tx);
+        run_ps_task("brightness", "{ [int]$args[0] }", &[], &outcome_tx);
 
-        let error = error_rx.try_recv().expect("error reported to UI");
-        assert_eq!(error.message, "brightness: requires at least one argument");
+        let outcome = outcome_rx.try_recv().expect("error reported to UI");
+        assert_eq!(
+            outcome,
+            PsOutcome::Error("brightness: requires at least one argument".into())
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_run_ps_task_reports_output_to_ui_channel() {
+        let (outcome_tx, outcome_rx) = async_channel::unbounded::<PsOutcome>();
+
+        run_ps_task("echo_test", "{ Write-Output 'hello world' }", &[], &outcome_tx);
+
+        let outcome = outcome_rx.try_recv().expect("output reported to UI");
+        assert_eq!(
+            outcome,
+            PsOutcome::Output {
+                name: "echo_test".into(),
+                text: "hello world".into(),
+            }
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_run_ps_task_ignores_empty_stdout() {
+        let (outcome_tx, outcome_rx) = async_channel::unbounded::<PsOutcome>();
+
+        run_ps_task("silent", "{ $x = 1 }", &[], &outcome_tx);
+
+        assert!(outcome_rx.try_recv().is_err());
     }
 }

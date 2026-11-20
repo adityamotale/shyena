@@ -9,7 +9,7 @@ use std::{path::Path, sync::Arc};
 use async_channel::Sender;
 use gpui::Window;
 
-use crate::dispatch::PsError;
+use crate::dispatch::PsOutcome;
 use crate::platform;
 
 /// Everything the launcher does to the world outside its own widget tree.
@@ -21,7 +21,13 @@ pub(crate) trait LauncherEffects: Send + Sync {
     fn spawn_app(&self, path: &Path, args: &[String]);
 
     /// Starts a PowerShell function on a worker thread.
-    fn spawn_powershell(&self, name: &str, body: &str, args: &[String], error_tx: Sender<PsError>);
+    fn spawn_powershell(
+        &self,
+        name: &str,
+        body: &str,
+        args: &[String],
+        outcome_tx: Sender<PsOutcome>,
+    );
 
     /// Asks Windows to evict idle pages from this process.
     fn trim_working_set(&self);
@@ -50,19 +56,25 @@ impl LauncherEffects for SystemEffects {
         }
     }
 
-    fn spawn_powershell(&self, name: &str, body: &str, args: &[String], error_tx: Sender<PsError>) {
+    fn spawn_powershell(
+        &self,
+        name: &str,
+        body: &str,
+        args: &[String],
+        outcome_tx: Sender<PsOutcome>,
+    ) {
         let name = name.to_string();
         let body = body.to_string();
         let args = args.to_vec();
-        let worker_tx = error_tx.clone();
+        let worker_tx = outcome_tx.clone();
         let worker_name = name.clone();
         if let Err(err) = std::thread::Builder::new()
             .name("shyena-ps-task".into())
             .spawn(move || crate::dispatch::run_ps_task(&worker_name, &body, &args, &worker_tx))
         {
-            let _ = error_tx.send_blocking(PsError {
-                message: format!("{name}: failed to start task: {err}"),
-            });
+            let _ = outcome_tx.send_blocking(PsOutcome::Error(
+                format!("{name}: failed to start task: {err}"),
+            ));
         }
     }
 
