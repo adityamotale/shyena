@@ -310,9 +310,29 @@ impl<'a> Scanner<'a> {
             } else if kw.eq_ignore_ascii_case("Set-Suggestions") {
                 ast.suggestions = Some(self.parse_suggestions()?);
             } else if kw.eq_ignore_ascii_case("Register-App") {
-                ast.apps.push(self.parse_app()?);
+                let app = self.parse_app()?;
+                let name = app.unquoted_name();
+                if ast
+                    .apps
+                    .iter()
+                    .any(|a| a.unquoted_name().eq_ignore_ascii_case(name))
+                {
+                    return Err(Self::error_at(
+                        start,
+                        format!("duplicate app name '{name}'"),
+                    ));
+                }
+                ast.apps.push(app);
             } else if kw.eq_ignore_ascii_case("function") {
-                ast.functions.push(self.parse_function()?);
+                let func = self.parse_function()?;
+                let name = func.name;
+                if ast.functions.iter().any(|f| f.name.eq_ignore_ascii_case(name)) {
+                    return Err(Self::error_at(
+                        start,
+                        format!("duplicate function name '{name}'"),
+                    ));
+                }
+                ast.functions.push(func);
             } else {
                 return Err(Self::error_at(start, format!("unexpected token '{kw}'")));
             }
@@ -965,5 +985,21 @@ function complex_fn {
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn test_duplicate_app_name_rejected() {
+        let src = "Register-App 'foo' @{ Path = 'a.exe' }\nRegister-App 'Foo' @{ Path = 'b.exe' }";
+        let err = Scanner::new(src).parse().unwrap_err();
+        assert_eq!(err.message, "duplicate app name 'Foo'");
+        assert_eq!(err.line, 2);
+    }
+
+    #[test]
+    fn test_duplicate_function_name_rejected() {
+        let src = "function myfunc { 1 }\nfunction MyFunc { 2 }";
+        let err = Scanner::new(src).parse().unwrap_err();
+        assert_eq!(err.message, "duplicate function name 'MyFunc'");
+        assert_eq!(err.line, 2);
     }
 }
