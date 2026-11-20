@@ -135,8 +135,8 @@ off the teardown/next-frame path and lets a quick reopen cancel it.
 `.shyena` is valid PowerShell syntax, which avoids the multi-line escaping overhead of
 static serialisation formats. Its top-level constructs are:
 
-- `Set-Theme 'dark' | 'light'` — case-insensitive, default `dark` (Macchiato); `light`
-  selects Latte.
+- `Set-Theme '<theme>'` — case-insensitive, default `macchiato`; options: `macchiato`,
+  `latte`, `everforest-light`, and `everforest-dark` (aliases: `dark`, `light`, `everforest`);
 - `Set-Suggestions 'on' | 'off'` — case-insensitive, default `on`. `off` skips candidate
   evaluation and hides the dropdown; the bar stays at base height and exact-key + Enter
   resolution still works.
