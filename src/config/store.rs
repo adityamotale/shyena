@@ -134,7 +134,7 @@ mod tests {
                 path.display()
             )
         );
-        assert_eq!(store.current().theme, Theme::Dark);
+        assert_eq!(store.current().theme, Theme::Macchiato);
         assert_eq!(store.current().suggestions, Suggestions::On);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -165,7 +165,7 @@ mod tests {
         let store = ConfigStore::load(path.clone());
 
         assert!(!store.has_error());
-        assert_eq!(store.current().theme, Theme::Dark);
+        assert_eq!(store.current().theme, Theme::Macchiato);
         assert_eq!(store.current().suggestions, Suggestions::On);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -219,7 +219,7 @@ mod tests {
             ReloadOutcome::Updated(config) => {
                 assert!(config.apps.contains_key("terminal"));
                 assert!(!config.apps.contains_key("editor"));
-                assert_eq!(config.theme, Theme::Light);
+                assert_eq!(config.theme, Theme::Latte);
                 assert_eq!(config.suggestions, Suggestions::Off);
             }
             ReloadOutcome::Error(message) => panic!("expected success, got: {message}"),
@@ -265,7 +265,7 @@ mod tests {
 
         match store.reload() {
             ReloadOutcome::Updated(config) => {
-                assert_eq!(config.theme, Theme::Light);
+                assert_eq!(config.theme, Theme::Latte);
                 assert!(config.apps.contains_key("term"));
             }
             ReloadOutcome::Error(message) => panic!("expected recovery, got: {message}"),

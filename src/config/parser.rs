@@ -349,8 +349,12 @@ impl<'a> Scanner<'a> {
         self.skip_whitespace_and_comments()?;
         let start = self.mark();
         let raw = self.read_string_literal()?;
-        Theme::from_config_str(strip_quotes(raw))
-            .ok_or_else(|| Self::error_at(start, "invalid theme: expected 'dark' or 'light'"))
+        Theme::from_config_str(strip_quotes(raw)).ok_or_else(|| {
+            Self::error_at(
+                start,
+                "invalid theme: expected 'macchiato', 'latte', 'everforest-light', or 'everforest-dark'",
+            )
+        })
     }
 
     fn parse_suggestions(&mut self) -> Result<Suggestions, ParseError> {
@@ -860,14 +864,22 @@ function complex_fn {
 
     #[test]
     fn test_parse_set_theme() {
+        let macchiato = "Set-Theme 'macchiato'\nRegister-App 'a' @{ Path = 'a.exe' }";
+        let ast = Scanner::new(macchiato).parse().expect("macchiato theme parses");
+        assert_eq!(ast.theme, Some(Theme::Macchiato));
+
+        let latte = "set-theme \"LATTE\"\nfunction f { }";
+        let ast = Scanner::new(latte).parse().expect("latte theme parses");
+        assert_eq!(ast.theme, Some(Theme::Latte));
+        assert_eq!(ast.functions.len(), 1);
+
         let dark = "Set-Theme 'dark'\nRegister-App 'a' @{ Path = 'a.exe' }";
-        let ast = Scanner::new(dark).parse().expect("dark theme parses");
-        assert_eq!(ast.theme, Some(Theme::Dark));
+        let ast = Scanner::new(dark).parse().expect("dark alias parses");
+        assert_eq!(ast.theme, Some(Theme::Macchiato));
 
         let light = "set-theme \"LIGHT\"\nfunction f { }";
-        let ast = Scanner::new(light).parse().expect("light theme parses");
-        assert_eq!(ast.theme, Some(Theme::Light));
-        assert_eq!(ast.functions.len(), 1);
+        let ast = Scanner::new(light).parse().expect("light alias parses");
+        assert_eq!(ast.theme, Some(Theme::Latte));
     }
 
     #[test]
@@ -881,7 +893,10 @@ function complex_fn {
     #[test]
     fn test_invalid_set_theme_error() {
         let err = Scanner::new("Set-Theme 'mocha'").parse().unwrap_err();
-        assert_eq!(err.message, "invalid theme: expected 'dark' or 'light'");
+        assert_eq!(
+            err.message,
+            "invalid theme: expected 'macchiato', 'latte', 'everforest-light', or 'everforest-dark'"
+        );
     }
 
     #[test]
@@ -901,14 +916,15 @@ function complex_fn {
         ] {
             let err = Scanner::new(source).parse().unwrap_err();
             assert_eq!(
-                err.message, "invalid theme: expected 'dark' or 'light'",
+                err.message,
+                "invalid theme: expected 'macchiato', 'latte', 'everforest-light', or 'everforest-dark'",
                 "source: {source}"
             );
             assert_eq!(err.line, 1);
         }
 
-        let light = Scanner::new("Set-Theme \"LIGHT\"").parse().unwrap();
-        assert_eq!(light.theme, Some(Theme::Light));
+        let latte = Scanner::new("Set-Theme \"LATTE\"").parse().unwrap();
+        assert_eq!(latte.theme, Some(Theme::Latte));
     }
 
     #[test]

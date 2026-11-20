@@ -33,7 +33,7 @@ pub(crate) fn fit_diagnostic(message: String) -> String {
     }
 }
 
-/// Defaults are defined by the setting types themselves: `Theme::Dark` and
+/// Defaults are defined by the setting types themselves: `Theme::Macchiato` and
 /// `Suggestions::On`. `Default` is also the fallback config used while a fatal
 /// config error is displayed.
 #[derive(Default)]
@@ -208,7 +208,7 @@ function brightness {
             .expect("default config parses");
         let cfg = Config::from_ast(&ast);
 
-        assert_eq!(cfg.theme, Theme::Dark);
+        assert_eq!(cfg.theme, Theme::Macchiato);
         assert_eq!(cfg.suggestions, Suggestions::On);
         assert_eq!(cfg.apps.len(), 4);
 
@@ -295,14 +295,14 @@ function brightness {
 
     #[test]
     fn test_theme_from_ast() {
-        let light = "Set-Theme 'light'\nRegister-App 'wt' @{ Path = 'wt.exe' }";
-        let ast = Scanner::new(light).parse().unwrap();
+        let latte = "Set-Theme 'latte'\nRegister-App 'wt' @{ Path = 'wt.exe' }";
+        let ast = Scanner::new(latte).parse().unwrap();
         let cfg = Config::from_ast(&ast);
-        assert_eq!(cfg.theme, Theme::Light);
+        assert_eq!(cfg.theme, Theme::Latte);
 
         let missing = "Register-App 'wt' @{ Path = 'wt.exe' }";
         let ast = Scanner::new(missing).parse().unwrap();
-        assert_eq!(Config::from_ast(&ast).theme, Theme::Dark);
+        assert_eq!(Config::from_ast(&ast).theme, Theme::Macchiato);
     }
 
     #[test]
@@ -321,7 +321,7 @@ function brightness {
     #[test]
     fn test_missing_directives_use_defaults() {
         let defaults = Config::default();
-        assert_eq!(defaults.theme, Theme::Dark);
+        assert_eq!(defaults.theme, Theme::Macchiato);
         assert_eq!(defaults.suggestions, Suggestions::On);
 
         // An older config with neither directive is still valid.

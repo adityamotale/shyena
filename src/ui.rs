@@ -1287,7 +1287,7 @@ Register-App 'app8' @{ Path = '8.exe' }
         assert_eq!(query, ":reload", "query before enter");
         h.cx.simulate_keystrokes("enter");
 
-        assert_eq!(h.config.store.borrow().current().theme, Theme::Light);
+        assert_eq!(h.config.store.borrow().current().theme, Theme::Latte);
         assert!(h.config.store.borrow().current().apps.contains_key("term"));
         assert!(h.active.borrow().is_none());
     }
