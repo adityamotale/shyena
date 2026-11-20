@@ -242,18 +242,13 @@ function brightness {
         let expected = [
             "lock",
             "standby",
+            "shutdown",
+            "restart",
             "volume",
-            "volume-up",
-            "volume-down",
             "mute",
-            "setclip",
-            "uuid",
-            "stamp",
-            "flushdns",
-            "hash",
-            "killproc",
             "open",
             "calc",
+            "brightness",
         ];
         assert_eq!(cfg.ps.len(), expected.len());
         for name in expected {
