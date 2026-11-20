@@ -326,7 +326,11 @@ impl<'a> Scanner<'a> {
             } else if kw.eq_ignore_ascii_case("function") {
                 let func = self.parse_function()?;
                 let name = func.name;
-                if ast.functions.iter().any(|f| f.name.eq_ignore_ascii_case(name)) {
+                if ast
+                    .functions
+                    .iter()
+                    .any(|f| f.name.eq_ignore_ascii_case(name))
+                {
                     return Err(Self::error_at(
                         start,
                         format!("duplicate function name '{name}'"),

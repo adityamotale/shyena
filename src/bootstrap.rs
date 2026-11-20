@@ -74,8 +74,13 @@ pub(crate) fn spawn_outcome_pump(cx: &mut App, rx: Receiver<PsOutcome>, ctx: &La
                 let handle = if let Some(handle) = handle {
                     handle
                 } else {
-                    let handle =
-                        ui::open_search_window(cx, &active, ps_outcome_tx.clone(), &store, &effects);
+                    let handle = ui::open_search_window(
+                        cx,
+                        &active,
+                        ps_outcome_tx.clone(),
+                        &store,
+                        &effects,
+                    );
                     *active.borrow_mut() = Some(handle);
                     handle
                 };
@@ -260,7 +265,10 @@ mod tests {
         let output = cx.update(|app| ui::output_message(&after, app));
         assert_eq!(
             output,
-            Some(("uuid".to_string(), "123e4567-e89b-12d3-a456-426614174000".to_string()))
+            Some((
+                "uuid".to_string(),
+                "123e4567-e89b-12d3-a456-426614174000".to_string()
+            ))
         );
     }
 }

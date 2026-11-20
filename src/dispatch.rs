@@ -191,9 +191,8 @@ pub(crate) fn run_ps_task(
             }
         }
         Err(err) => {
-            let _ = outcome_tx.send_blocking(PsOutcome::Error(
-                exec::format_ps_error(function_name, &err),
-            ));
+            let _ = outcome_tx
+                .send_blocking(PsOutcome::Error(exec::format_ps_error(function_name, &err)));
         }
     }
 }
@@ -410,7 +409,12 @@ mod tests {
     fn test_run_ps_task_reports_output_to_ui_channel() {
         let (outcome_tx, outcome_rx) = async_channel::unbounded::<PsOutcome>();
 
-        run_ps_task("echo_test", "{ Write-Output 'hello world' }", &[], &outcome_tx);
+        run_ps_task(
+            "echo_test",
+            "{ Write-Output 'hello world' }",
+            &[],
+            &outcome_tx,
+        );
 
         let outcome = outcome_rx.try_recv().expect("output reported to UI");
         assert_eq!(

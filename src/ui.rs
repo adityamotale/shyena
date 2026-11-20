@@ -179,8 +179,11 @@ impl SearchBar {
 
     fn output_panel_height(&self) -> f32 {
         if let Some(out) = &self.output {
-            let line_count = out.text.lines().count().max(1).min(MAX_OUTPUT_LINES);
-            OUTPUT_HEADER_HEIGHT + (line_count as f32 * OUTPUT_LINE_HEIGHT) + OUTPUT_PADDING
+            let line_count = f32::from(
+                u8::try_from(out.text.lines().count().clamp(1, MAX_OUTPUT_LINES))
+                    .unwrap_or(u8::MAX),
+            );
+            OUTPUT_HEADER_HEIGHT + line_count * OUTPUT_LINE_HEIGHT + OUTPUT_PADDING
         } else {
             0.0
         }
@@ -929,7 +932,10 @@ impl SearchBar {
                 )
                 .child(
                     div()
-                        .max_h(px(OUTPUT_LINE_HEIGHT * MAX_OUTPUT_LINES as f32 + OUTPUT_PADDING))
+                        .max_h(px(f32::from(
+                            u8::try_from(MAX_OUTPUT_LINES).unwrap_or(u8::MAX),
+                        ) * OUTPUT_LINE_HEIGHT
+                            + OUTPUT_PADDING))
                         .overflow_hidden()
                         .px(px(12.0))
                         .py(px(6.0))
@@ -1062,7 +1068,9 @@ pub(crate) fn output_message<C: AppContext>(
 ) -> Option<(String, String)> {
     window
         .update(cx, |bar, _, _| {
-            bar.output.as_ref().map(|o| (o.name.clone(), o.text.clone()))
+            bar.output
+                .as_ref()
+                .map(|o| (o.name.clone(), o.text.clone()))
         })
         .ok()
         .flatten()
@@ -1132,7 +1140,11 @@ mod tests {
         }
 
         fn output(&mut self) -> Option<(String, String)> {
-            self.state(|bar| bar.output.as_ref().map(|o| (o.name.clone(), o.text.clone())))
+            self.state(|bar| {
+                bar.output
+                    .as_ref()
+                    .map(|o| (o.name.clone(), o.text.clone()))
+            })
         }
 
         /// Drives timers scheduled with `Timer::after` on the foreground executor.
@@ -1225,7 +1237,7 @@ mod tests {
 
     #[gpui::test]
     fn arrow_keys_clamp_to_max_visible_items(cx: &TestAppContext) {
-        let config_many_apps = r#"
+        let config_many_apps = r"
 Register-App 'app1' @{ Path = '1.exe' }
 Register-App 'app2' @{ Path = '2.exe' }
 Register-App 'app3' @{ Path = '3.exe' }
@@ -1234,7 +1246,7 @@ Register-App 'app5' @{ Path = '5.exe' }
 Register-App 'app6' @{ Path = '6.exe' }
 Register-App 'app7' @{ Path = '7.exe' }
 Register-App 'app8' @{ Path = '8.exe' }
-"#;
+";
         let mut h = open(cx, config_many_apps);
         h.cx.simulate_keystrokes("@");
         assert!(h.candidates().len() > MAX_VISIBLE_ITEMS);

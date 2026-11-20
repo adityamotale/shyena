@@ -72,9 +72,9 @@ impl LauncherEffects for SystemEffects {
             .name("shyena-ps-task".into())
             .spawn(move || crate::dispatch::run_ps_task(&worker_name, &body, &args, &worker_tx))
         {
-            let _ = outcome_tx.send_blocking(PsOutcome::Error(
-                format!("{name}: failed to start task: {err}"),
-            ));
+            let _ = outcome_tx.send_blocking(PsOutcome::Error(format!(
+                "{name}: failed to start task: {err}"
+            )));
         }
     }
 
