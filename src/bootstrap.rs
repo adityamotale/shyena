@@ -4,7 +4,7 @@
 //! marshalled onto GPUI's UI thread through `cx.update`; the shared context is
 //! cloned per event so a slow UI update cannot block the next message.
 
-use std::{cell::RefCell, rc::Rc, thread};
+use std::{cell::RefCell, rc::Rc, thread, time::Duration};
 
 use async_channel::{Receiver, Sender};
 use global_hotkey::{
@@ -39,9 +39,34 @@ pub(crate) fn setup_global_hotkey(tx: Sender<()>) -> GlobalHotKeyManager {
 
     let hotkey = HotKey::new(Some(modifiers), Code::Backquote);
     let hotkey_id = hotkey.id();
-    manager
-        .register(hotkey)
-        .unwrap_or_else(|_| panic!("Failed to register {label} global hotkey"));
+
+    let mut registered = false;
+    for attempt in 0..10 {
+        if manager.register(hotkey).is_ok() {
+            registered = true;
+            break;
+        }
+        if attempt < 9 {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    if !registered {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+            let msg = HSTRING::from(format!(
+                "Failed to register global hotkey ({label}); another application may be using it."
+            ));
+            let title = HSTRING::from("Shyena - Hotkey Registration Failed");
+            unsafe {
+                let _ = MessageBoxW(None, &msg, &title, MB_OK | MB_ICONERROR);
+            }
+        }
+        panic!("Failed to register {label} global hotkey");
+    }
 
     let event_receiver = GlobalHotKeyEvent::receiver().clone();
     thread::spawn(move || {

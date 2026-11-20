@@ -541,8 +541,6 @@ impl SearchBar {
 
                 self.effects.spawn_updater();
                 self.close(window, cx);
-                #[cfg(not(test))]
-                std::process::exit(0);
             }
             InternalCommand::Quit => {
                 if !args.is_empty() {

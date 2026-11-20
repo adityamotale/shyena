@@ -5,6 +5,8 @@
 //! be asserted without touching the operating system.
 
 use std::{path::Path, sync::Arc};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use async_channel::Sender;
 use gpui::Window;
@@ -96,6 +98,8 @@ impl LauncherEffects for SystemEffects {
             "-Command",
             &script,
         ]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE — spawn a visible terminal
         if let Err(err) = cmd.spawn() {
             eprintln!("Failed to spawn updater: {err}");
         }

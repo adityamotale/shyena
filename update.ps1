@@ -366,6 +366,10 @@ try {
         if ([Environment]::UserInteractive -and -not $Yes) {
             Start-Sleep -Seconds 2
         }
+        $running = @(Get-Process -Name 'shyena' -ErrorAction SilentlyContinue)
+        if ($running.Count -eq 0 -and (Test-Path -LiteralPath $exeTarget)) {
+            Start-Process -FilePath $exeTarget
+        }
         exit 0
     }
 
