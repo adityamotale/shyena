@@ -415,15 +415,17 @@ impl SearchBar {
                 this.close(window, cx);
             }
             "down" => {
-                if !this.filtered_actions.is_empty() {
-                    this.selected_index = (this.selected_index + 1) % this.filtered_actions.len();
+                let visible = this.filtered_actions.len().min(MAX_VISIBLE_ITEMS);
+                if visible > 0 {
+                    this.selected_index = (this.selected_index + 1) % visible;
                     cx.notify();
                 }
             }
             "up" => {
-                if !this.filtered_actions.is_empty() {
+                let visible = this.filtered_actions.len().min(MAX_VISIBLE_ITEMS);
+                if visible > 0 {
                     this.selected_index = if this.selected_index == 0 {
-                        this.filtered_actions.len() - 1
+                        visible - 1
                     } else {
                         this.selected_index - 1
                     };
@@ -1219,6 +1221,32 @@ mod tests {
             h.effects.app_launches()[0].path,
             PathBuf::from(r"C:\Windows\System32\notepad.exe")
         );
+    }
+
+    #[gpui::test]
+    fn arrow_keys_clamp_to_max_visible_items(cx: &TestAppContext) {
+        let config_many_apps = r#"
+Register-App 'app1' @{ Path = '1.exe' }
+Register-App 'app2' @{ Path = '2.exe' }
+Register-App 'app3' @{ Path = '3.exe' }
+Register-App 'app4' @{ Path = '4.exe' }
+Register-App 'app5' @{ Path = '5.exe' }
+Register-App 'app6' @{ Path = '6.exe' }
+Register-App 'app7' @{ Path = '7.exe' }
+Register-App 'app8' @{ Path = '8.exe' }
+"#;
+        let mut h = open(cx, config_many_apps);
+        h.cx.simulate_keystrokes("@");
+        assert!(h.candidates().len() > MAX_VISIBLE_ITEMS);
+        assert_eq!(h.selected(), 0);
+
+        // Pressing up from 0 wraps to the last visible item (MAX_VISIBLE_ITEMS - 1)
+        h.cx.simulate_keystrokes("up");
+        assert_eq!(h.selected(), MAX_VISIBLE_ITEMS - 1);
+
+        // Pressing down from last visible item wraps back to 0
+        h.cx.simulate_keystrokes("down");
+        assert_eq!(h.selected(), 0);
     }
 
     #[gpui::test]
