@@ -22,8 +22,9 @@
 # 1  BEHAVIOR
 # =============================================================================
 
-# Palette: 'dark' = Catppuccin Macchiato, 'light' = Catppuccin Latte.
-Set-Theme 'dark'
+# Palette: 'macchiato' (Catppuccin Macchiato, default), 'latte' (Catppuccin Latte),
+#          'everforest-light' (Everforest Light), 'everforest-dark' (Everforest Dark);
+Set-Theme 'everforest-dark'
 
 # Candidate list: 'on' = search as you type, 'off' = exact key + Enter only.
 Set-Suggestions 'on'
